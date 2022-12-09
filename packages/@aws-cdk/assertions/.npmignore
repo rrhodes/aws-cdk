@@ -22,3 +22,5 @@ junit.xml
 test/
 !.jsii
 !*.js
+!*.lit.ts
+**/*.snapshot

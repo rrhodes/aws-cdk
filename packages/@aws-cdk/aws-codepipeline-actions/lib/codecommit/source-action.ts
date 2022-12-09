@@ -3,12 +3,9 @@ import * as codepipeline from '@aws-cdk/aws-codepipeline';
 import * as targets from '@aws-cdk/aws-events-targets';
 import * as iam from '@aws-cdk/aws-iam';
 import { Names, Stack, Token, TokenComparison } from '@aws-cdk/core';
+import { Construct } from 'constructs';
 import { Action } from '../action';
 import { sourceArtifactBounds } from '../common';
-
-// keep this import separate from other imports to reduce chance for merge conflicts with v2-main
-// eslint-disable-next-line no-duplicate-imports, import/order
-import { Construct } from '@aws-cdk/core';
 
 /**
  * How should the CodeCommit Action detect changes.
@@ -106,6 +103,15 @@ export interface CodeCommitSourceActionProps extends codepipeline.CommonAwsActio
 
 /**
  * CodePipeline Source that is provided by an AWS CodeCommit repository.
+ *
+ * If the CodeCommit repository is in a different account, you must use
+ * `CodeCommitTrigger.EVENTS` to trigger the pipeline.
+ *
+ * (That is because the Pipeline structure normally only has a `RepositoryName`
+ * field, and that is not enough for the pipeline to locate the repository's
+ * source account. However, if the pipeline is triggered via an EventBridge
+ * event, the event itself has the full repository ARN in there, allowing the
+ * pipeline to locate the repository).
  */
 export class CodeCommitSourceAction extends Action {
   /**
@@ -165,6 +171,7 @@ export class CodeCommitSourceAction extends Action {
           eventRole: this.props.eventRole,
         }),
         branches: [this.branch],
+        crossStackScope: stage.pipeline as unknown as Construct,
       });
     }
 

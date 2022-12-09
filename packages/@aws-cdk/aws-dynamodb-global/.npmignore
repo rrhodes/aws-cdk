@@ -25,3 +25,6 @@ tsconfig.json
 **/cdk.out
 junit.xml
 test/
+!*.lit.ts
+jest.config.js
+**/*.snapshot

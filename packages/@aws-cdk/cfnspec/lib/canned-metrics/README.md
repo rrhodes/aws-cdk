@@ -56,7 +56,7 @@ HTTP code (ELB or backend), the metric name itself comes from an ENUM.
   public metricHttpCodeTarget(code: HttpCodeTarget, props?: cloudwatch.MetricOptions) {
 ```
 
-NetworkLoadBalancer: get rid of underscores and recapitalize abbrevations
+NetworkLoadBalancer: get rid of underscores and recapitalize abbreviations
 
 ```js
 metricTcpClientResetCount => 'TCP_Client_Reset_Count'
@@ -161,3 +161,8 @@ example, when they decide that a `defaultStatistic` of `Average` should have
 been `Sum`, for example. On the other hand, we have a fixed statistic
 contract -- once a metric object emits under a particular statistic, we can
 never change it or we will break downstream users.
+
+
+## Updating
+
+To update these metrics, see the `build-tools/update-metrics.sh` script.

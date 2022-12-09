@@ -5,12 +5,25 @@ import * as elb from '@aws-cdk/aws-elasticloadbalancing';
 import * as elbv2 from '@aws-cdk/aws-elasticloadbalancingv2';
 import * as iam from '@aws-cdk/aws-iam';
 import * as cloudmap from '@aws-cdk/aws-servicediscovery';
-import { Annotations, Duration, IResolvable, IResource, Lazy, Resource, Stack } from '@aws-cdk/core';
+import {
+  Annotations,
+  Duration,
+  IResolvable,
+  IResource,
+  Lazy,
+  Resource,
+  Stack,
+  ArnFormat,
+  FeatureFlags,
+} from '@aws-cdk/core';
+import * as cxapi from '@aws-cdk/cx-api';
+
 import { Construct } from 'constructs';
 import { LoadBalancerTargetOptions, NetworkMode, TaskDefinition } from '../base/task-definition';
-import { ICluster, CapacityProviderStrategy, ExecuteCommandLogging } from '../cluster';
+import { ICluster, CapacityProviderStrategy, ExecuteCommandLogging, Cluster } from '../cluster';
 import { ContainerDefinition, Protocol } from '../container-definition';
 import { CfnService } from '../ecs.generated';
+import { LogDriver, LogDriverConfig } from '../log-drivers/log-driver';
 import { ScalableTaskCount } from './scalable-task-count';
 
 /**
@@ -53,7 +66,6 @@ export interface DeploymentCircuitBreaker {
    * @default false
    */
   readonly rollback?: boolean;
-
 }
 
 export interface EcsTarget {
@@ -91,6 +103,76 @@ export interface EcsTarget {
  * Interface for ECS load balancer target.
  */
 export interface IEcsLoadBalancerTarget extends elbv2.IApplicationLoadBalancerTarget, elbv2.INetworkLoadBalancerTarget, elb.ILoadBalancerTarget {
+}
+
+/**
+ * Interface for Service Connect configuration.
+ */
+export interface ServiceConnectProps {
+  /**
+   * The cloudmap namespace to register this service into.
+   *
+   * @default the cloudmap namespace specified on the cluster.
+   */
+  readonly namespace?: string;
+
+  /**
+   * The list of Services, including a port mapping, terse client alias, and optional intermediate DNS name.
+   *
+   * This property may be left blank if the current ECS service does not need to advertise any ports via Service Connect.
+   *
+   * @default none
+   */
+  readonly services?: ServiceConnectService[];
+
+  /**
+   * The log driver configuration to use for the Service Connect agent logs.
+   *
+   * @default - none
+   */
+  readonly logDriver?: LogDriver;
+}
+
+/**
+ * Interface for service connect Service props.
+ */
+export interface ServiceConnectService {
+  /**
+   * portMappingName specifies which port and protocol combination should be used for this
+   * service connect service.
+   */
+  readonly portMappingName: string;
+
+  /**
+   * Optionally specifies an intermediate dns name to register in the CloudMap namespace.
+   * This is required if you wish to use the same port mapping name in more than one service.
+   *
+   * @default - port mapping name
+   */
+  readonly discoveryName?: string;
+
+  /**
+   * The terse DNS alias to use for this port mapping in the service connect mesh.
+   * Service Connect-enabled clients will be able to reach this service at
+   * http://dnsName:port.
+   *
+   * @default - No alias is created. The service is reachable at `portMappingName.namespace:port`.
+   */
+  readonly dnsName?: string;
+
+  /**
+   The port for clients to use to communicate with this service via Service Connect.
+   *
+   * @default the container port specified by the port mapping in portMappingName.
+   */
+  readonly port?: number;
+
+  /**
+   * Optional. The port on the Service Connect agent container to use for traffic ingress to this service.
+   *
+   * @default - none
+   */
+  readonly ingressPortOverride?: number;
 }
 
 /**
@@ -205,6 +287,14 @@ export interface BaseServiceOptions {
    *  @default - undefined
    */
   readonly enableExecuteCommand?: boolean;
+
+  /**
+   * Configuration for Service Connect.
+   *
+   * @default No ports are advertised via Service Connect on this service, and the service
+   * cannot make requests to other services via Service Connect.
+   */
+  readonly serviceConnectConfiguration?: ServiceConnectProps;
 }
 
 /**
@@ -315,6 +405,49 @@ export interface IBaseService extends IService {
  */
 export abstract class BaseService extends Resource
   implements IBaseService, elbv2.IApplicationLoadBalancerTarget, elbv2.INetworkLoadBalancerTarget, elb.ILoadBalancerTarget {
+  /**
+   * Import an existing ECS/Fargate Service using the service cluster format.
+   * The format is the "new" format "arn:aws:ecs:region:aws_account_id:service/cluster-name/service-name".
+   * @see https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-account-settings.html#ecs-resource-ids
+   */
+  public static fromServiceArnWithCluster(scope: Construct, id: string, serviceArn: string): IBaseService {
+    const stack = Stack.of(scope);
+    const arn = stack.splitArn(serviceArn, ArnFormat.SLASH_RESOURCE_NAME);
+    const resourceName = arn.resourceName;
+    if (!resourceName) {
+      throw new Error('Missing resource Name from service ARN: ${serviceArn}');
+    }
+    const resourceNameParts = resourceName.split('/');
+    if (resourceNameParts.length !== 2) {
+      throw new Error(`resource name ${resourceName} from service ARN: ${serviceArn} is not using the ARN cluster format`);
+    }
+    const clusterName = resourceNameParts[0];
+    const serviceName = resourceNameParts[1];
+
+    const clusterArn = Stack.of(scope).formatArn({
+      partition: arn.partition,
+      region: arn.region,
+      account: arn.account,
+      service: 'ecs',
+      resource: 'cluster',
+      resourceName: clusterName,
+    });
+
+    const cluster = Cluster.fromClusterArn(scope, `${id}Cluster`, clusterArn);
+
+    class Import extends Resource implements IBaseService {
+      public readonly serviceArn = serviceArn;
+      public readonly serviceName = serviceName;
+      public readonly cluster = cluster;
+    }
+
+    return new Import(scope, id, {
+      environmentFromArn: serviceArn,
+    });
+  }
+
+  private static MIN_PORT = 1;
+  private static MAX_PORT = 65535;
 
   /**
    * The security groups which manage the allowed network traffic for the service.
@@ -366,6 +499,12 @@ export abstract class BaseService extends Resource
    */
   protected serviceRegistries = new Array<CfnService.ServiceRegistryProperty>();
 
+  /**
+   * The service connect configuration for this service.
+   * @internal
+   */
+  protected _serviceConnectConfig?: CfnService.ServiceConnectConfigurationProperty;
+
   private readonly resource: CfnService;
   private scalableTaskCount?: ScalableTaskCount;
 
@@ -394,6 +533,7 @@ export abstract class BaseService extends Resource
       undefined : props.launchType;
 
     const propagateTagsFromSource = props.propagateTaskTagsFrom ?? props.propagateTags ?? PropagatedTagSource.NONE;
+    const deploymentController = this.getDeploymentController(props);
 
     this.resource = new CfnService(this, 'Service', {
       desiredCount: props.desiredCount,
@@ -409,9 +549,7 @@ export abstract class BaseService extends Resource
       },
       propagateTags: propagateTagsFromSource === PropagatedTagSource.NONE ? undefined : props.propagateTags,
       enableEcsManagedTags: props.enableECSManagedTags ?? false,
-      deploymentController: props.circuitBreaker ? {
-        type: DeploymentControllerType.ECS,
-      } : props.deploymentController,
+      deploymentController: deploymentController,
       launchType: launchType,
       enableExecuteCommand: props.enableExecuteCommand,
       capacityProviderStrategy: props.capacityProviderStrategies,
@@ -419,11 +557,25 @@ export abstract class BaseService extends Resource
       /* role: never specified, supplanted by Service Linked Role */
       networkConfiguration: Lazy.any({ produce: () => this.networkConfiguration }, { omitEmptyArray: true }),
       serviceRegistries: Lazy.any({ produce: () => this.serviceRegistries }, { omitEmptyArray: true }),
+      serviceConnectConfiguration: Lazy.any({ produce: () => this._serviceConnectConfig }, { omitEmptyArray: true }),
       ...additionalProps,
     });
 
     if (props.deploymentController?.type === DeploymentControllerType.EXTERNAL) {
       Annotations.of(this).addWarning('taskDefinition and launchType are blanked out when using external deployment controller.');
+    }
+
+    if (props.circuitBreaker
+        && deploymentController
+        && deploymentController.type !== DeploymentControllerType.ECS) {
+      Annotations.of(this).addError('Deployment circuit breaker requires the ECS deployment controller.');
+    }
+    if (props.deploymentController?.type === DeploymentControllerType.CODE_DEPLOY) {
+      // Strip the revision ID from the service's task definition property to
+      // prevent new task def revisions in the stack from triggering updates
+      // to the stack's ECS service resource
+      this.resource.taskDefinition = taskDefinition.family;
+      this.node.addDependency(taskDefinition);
     }
 
     this.serviceArn = this.getResourceArnAttribute(this.resource.ref, {
@@ -437,6 +589,10 @@ export abstract class BaseService extends Resource
 
     if (props.cloudMapOptions) {
       this.enableCloudMap(props.cloudMapOptions);
+    }
+
+    if (props.serviceConnectConfiguration) {
+      this.enableServiceConnect(props.serviceConnectConfiguration);
     }
 
     if (props.enableExecuteCommand) {
@@ -454,11 +610,160 @@ export abstract class BaseService extends Resource
     this.node.defaultChild = this.resource;
   }
 
+  /**   * Enable Service Connect
+   */
+  public enableServiceConnect(config?: ServiceConnectProps) {
+    if (this._serviceConnectConfig) {
+      throw new Error('Service connect configuration cannot be specified more than once.');
+    }
+
+    this.validateServiceConnectConfiguration(config);
+
+    let cfg = config || {};
+
+    /**
+     * Namespace already exists as validated in validateServiceConnectConfiguration.
+     * Resolve which namespace to use by picking:
+     * 1. The namespace defined in service connect config.
+     * 2. The namespace defined in the cluster's defaultCloudMapNamespace property.
+    */
+    let namespace;
+    if (this.cluster.defaultCloudMapNamespace) {
+      namespace = this.cluster.defaultCloudMapNamespace.namespaceName;
+    }
+
+    if (cfg.namespace) {
+      namespace = cfg.namespace;
+    }
+
+    /**
+     * Map services to CFN property types. This block manages:
+     * 1. Finding the correct port.
+     * 2. Client alias enumeration
+     */
+    const services = cfg.services?.map(svc => {
+      const containerPort = this.taskDefinition.findPortMappingByName(svc.portMappingName)?.containerPort;
+      if (!containerPort) {
+        throw new Error(`Port mapping with name ${svc.portMappingName} does not exist.`);
+      }
+      const alias = {
+        port: svc.port || containerPort,
+        dnsName: svc.dnsName,
+      };
+
+      return {
+        portName: svc.portMappingName,
+        discoveryName: svc.discoveryName,
+        ingressPortOverride: svc.ingressPortOverride,
+        clientAliases: [alias],
+      } as CfnService.ServiceConnectServiceProperty;
+    });
+
+    let logConfig: LogDriverConfig | undefined;
+    if (cfg.logDriver && this.taskDefinition.defaultContainer) {
+      // Default container existence is validated in validateServiceConnectConfiguration.
+      // We only need the default container so that bind() can get the task definition from the container definition.
+      logConfig = cfg.logDriver.bind(this, this.taskDefinition.defaultContainer);
+    }
+
+    this._serviceConnectConfig = {
+      enabled: true,
+      logConfiguration: logConfig,
+      namespace: namespace,
+      services: services,
+    };
+  };
+
+  /**
+   * Validate Service Connect Configuration
+   */
+  private validateServiceConnectConfiguration(config?: ServiceConnectProps) {
+    if (!this.taskDefinition.defaultContainer) {
+      throw new Error('Task definition must have at least one container to enable service connect.');
+    }
+
+    // Check the implicit enable case; when config isn't specified or namespace isn't specified, we need to check that there is a namespace on the cluster.
+    if ((!config || !config.namespace) && !this.cluster.defaultCloudMapNamespace) {
+      throw new Error('Namespace must be defined either in serviceConnectConfig or cluster.defaultCloudMapNamespace');
+    }
+
+    // When config isn't specified, return.
+    if (!config) {
+      return;
+    }
+
+    if (!config.services) {
+      return;
+    }
+    let portNames = new Map<string, string[]>();
+    config.services.forEach(serviceConnectService => {
+      // port must exist on the task definition
+      if (!this.taskDefinition.findPortMappingByName(serviceConnectService.portMappingName)) {
+        throw new Error(`Port Mapping '${serviceConnectService.portMappingName}' does not exist on the task definition.`);
+      };
+
+      // Check that no two service connect services use the same discovery name.
+      const discoveryName = serviceConnectService.discoveryName || serviceConnectService.portMappingName;
+      if (portNames.get(serviceConnectService.portMappingName)?.includes(discoveryName)) {
+        throw new Error(`Cannot create multiple services with the discoveryName '${discoveryName}'.`);
+      }
+
+      let currentDiscoveries = portNames.get(serviceConnectService.portMappingName);
+      if (!currentDiscoveries) {
+        portNames.set(serviceConnectService.portMappingName, [discoveryName]);
+      } else {
+        currentDiscoveries.push(discoveryName);
+        portNames.set(serviceConnectService.portMappingName, currentDiscoveries);
+      }
+
+      // IngressPortOverride should be within the valid port range if it exists.
+      if (serviceConnectService.ingressPortOverride && !this.isValidPort(serviceConnectService.ingressPortOverride)) {
+        throw new Error(`ingressPortOverride ${serviceConnectService.ingressPortOverride} is not valid.`);
+      }
+
+      // clientAlias.port should be within the valid port range
+      if (serviceConnectService.port &&
+        !this.isValidPort(serviceConnectService.port)) {
+        throw new Error(`Client Alias port ${serviceConnectService.port} is not valid.`);
+      }
+    });
+  }
+
+  /**
+   * Determines if a port is valid
+   *
+   * @param port: The port number
+   * @returns boolean whether the port is valid
+   */
+  private isValidPort(port?: number): boolean {
+    return !!(port && Number.isInteger(port) && port >= BaseService.MIN_PORT && port <= BaseService.MAX_PORT);
+  }
+
   /**
    * The CloudMap service created for this service, if any.
    */
   public get cloudMapService(): cloudmap.IService | undefined {
     return this.cloudmapService;
+  }
+
+  private getDeploymentController(props: BaseServiceProps): DeploymentController | undefined {
+    if (props.deploymentController) {
+      // The customer is always right
+      return props.deploymentController;
+    }
+    const disableCircuitBreakerEcsDeploymentControllerFeatureFlag =
+        FeatureFlags.of(this).isEnabled(cxapi.ECS_DISABLE_EXPLICIT_DEPLOYMENT_CONTROLLER_FOR_CIRCUIT_BREAKER);
+
+    if (!disableCircuitBreakerEcsDeploymentControllerFeatureFlag && props.circuitBreaker) {
+      // This is undesirable behavior (the controller is implicitly ECS anyway when left
+      // undefined, so specifying it is not necessary but DOES trigger a CFN replacement)
+      // but we leave it in for backwards compat.
+      return {
+        type: DeploymentControllerType.ECS,
+      };
+    }
+
+    return undefined;
   }
 
   private executeCommandLogConfiguration() {
@@ -470,7 +775,7 @@ export abstract class BaseService extends Resource
       resources: ['*'],
     }));
 
-    const logGroupArn = logConfiguration?.cloudWatchLogGroup ? `arn:aws:logs:${this.stack.region}:${this.stack.account}:log-group:${logConfiguration.cloudWatchLogGroup.logGroupName}:*` : '*';
+    const logGroupArn = logConfiguration?.cloudWatchLogGroup ? `arn:${this.stack.partition}:logs:${this.env.region}:${this.env.account}:log-group:${logConfiguration.cloudWatchLogGroup.logGroupName}:*` : '*';
     this.taskDefinition.addToTaskRolePolicy(new iam.PolicyStatement({
       actions: [
         'logs:CreateLogStream',
@@ -491,14 +796,14 @@ export abstract class BaseService extends Resource
         actions: [
           's3:PutObject',
         ],
-        resources: [`arn:aws:s3:::${logConfiguration.s3Bucket.bucketName}/*`],
+        resources: [`arn:${this.stack.partition}:s3:::${logConfiguration.s3Bucket.bucketName}/*`],
       }));
       if (logConfiguration.s3EncryptionEnabled) {
         this.taskDefinition.addToTaskRolePolicy(new iam.PolicyStatement({
           actions: [
             's3:GetEncryptionConfiguration',
           ],
-          resources: [`arn:aws:s3:::${logConfiguration.s3Bucket.bucketName}`],
+          resources: [`arn:${this.stack.partition}:s3:::${logConfiguration.s3Bucket.bucketName}`],
         }));
       }
     }
@@ -518,7 +823,7 @@ export abstract class BaseService extends Resource
         'kms:*',
       ],
       resources: ['*'],
-      principals: [new iam.ArnPrincipal(`arn:aws:iam::${this.stack.account}:root`)],
+      principals: [new iam.ArnPrincipal(`arn:${this.stack.partition}:iam::${this.env.account}:root`)],
     }));
 
     if (logging === ExecuteCommandLogging.DEFAULT || this.cluster.executeCommandConfiguration?.logConfiguration?.cloudWatchEncryptionEnabled) {
@@ -531,9 +836,9 @@ export abstract class BaseService extends Resource
           'kms:Describe*',
         ],
         resources: ['*'],
-        principals: [new iam.ServicePrincipal(`logs.${this.stack.region}.amazonaws.com`)],
+        principals: [new iam.ServicePrincipal(`logs.${this.env.region}.amazonaws.com`)],
         conditions: {
-          ArnLike: { 'kms:EncryptionContext:aws:logs:arn': `arn:aws:logs:${this.stack.region}:${this.stack.account}:*` },
+          ArnLike: { 'kms:EncryptionContext:aws:logs:arn': `arn:${this.stack.partition}:logs:${this.env.region}:${this.env.account}:*` },
         },
       }));
     }
@@ -570,6 +875,8 @@ export abstract class BaseService extends Resource
    *
    * @example
    *
+   * declare const listener: elbv2.ApplicationListener;
+   * declare const service: ecs.BaseService;
    * listener.addTargets('ECS', {
    *   port: 80,
    *   targets: [service.loadBalancerTarget({
@@ -605,6 +912,8 @@ export abstract class BaseService extends Resource
    *
    * @example
    *
+   * declare const listener: elbv2.ApplicationListener;
+   * declare const service: ecs.BaseService;
    * service.registerLoadBalancerTargets(
    *   {
    *     containerName: 'web',
@@ -746,7 +1055,7 @@ export abstract class BaseService extends Resource
     return new cloudwatch.Metric({
       namespace: 'AWS/ECS',
       metricName,
-      dimensions: { ClusterName: this.cluster.clusterName, ServiceName: this.serviceName },
+      dimensionsMap: { ClusterName: this.cluster.clusterName, ServiceName: this.serviceName },
       ...props,
     }).attachTo(this);
   }
@@ -945,7 +1254,7 @@ export interface CloudMapOptions {
   /**
    * The amount of time that you want DNS resolvers to cache the settings for this record.
    *
-   * @default 60
+   * @default Duration.minutes(1)
    */
   readonly dnsTtl?: Duration;
 

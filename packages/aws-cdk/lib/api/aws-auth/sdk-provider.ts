@@ -1,16 +1,16 @@
-import * as https from 'https';
 import * as os from 'os';
 import * as path from 'path';
 import * as cxapi from '@aws-cdk/cx-api';
 import * as AWS from 'aws-sdk';
 import type { ConfigurationOptions } from 'aws-sdk/lib/config-base';
 import * as fs from 'fs-extra';
-import { debug, warning } from '../../logging';
-import { cached } from '../../util/functions';
-import { CredentialPlugins } from '../aws-auth/credential-plugins';
-import { Mode } from '../aws-auth/credentials';
+import { traceMethods } from '../../util/tracing';
+import { debug, warning } from './_env';
 import { AwsCliCompatible } from './awscli-compatible';
-import { ISDK, SDK } from './sdk';
+import { cached } from './cached';
+import { CredentialPlugins } from './credential-plugins';
+import { Mode } from './credentials';
+import { ISDK, SDK, isUnrecoverableAwsError } from './sdk';
 
 
 // Some configuration that can only be achieved by setting
@@ -79,6 +79,33 @@ const CACHED_ACCOUNT = Symbol('cached_account');
 const CACHED_DEFAULT_CREDENTIALS = Symbol('cached_default_credentials');
 
 /**
+ * SDK configuration for a given environment
+ * 'forEnvironment' will attempt to assume a role and if it
+ * is not successful, then it will either:
+ *   1. Check to see if the default credentials (local credentials the CLI was executed with)
+ *      are for the given environment. If they are then return those.
+ *   2. If the default credentials are not for the given environment then
+ *      throw an error
+ *
+ * 'didAssumeRole' allows callers to whether they are receiving the assume role
+ * credentials or the default credentials.
+ */
+export interface SdkForEnvironment {
+  /**
+   * The SDK for the given environment
+   */
+  readonly sdk: ISDK;
+
+  /**
+   * Whether or not the assume role was successful.
+   * If the assume role was not successful (false)
+   * then that means that the 'sdk' returned contains
+   * the default credentials (not the assume role credentials)
+   */
+  readonly didAssumeRole: boolean;
+}
+
+/**
  * Creates instances of the AWS SDK appropriate for a given account/region.
  *
  * Behavior is as follows:
@@ -101,6 +128,7 @@ const CACHED_DEFAULT_CREDENTIALS = Symbol('cached_default_credentials');
  *     - Seeded terminal with `ReadOnly` credentials in order to do `cdk diff`--the `ReadOnly`
  *       role doesn't have `sts:AssumeRole` and will fail for no real good reason.
  */
+@traceMethods
 export class SdkProvider {
   /**
    * Create a new SdkProvider which gets its defaults in a way that behaves like the AWS CLI does
@@ -141,7 +169,11 @@ export class SdkProvider {
    *
    * The `environment` parameter is resolved first (see `resolveEnvironment()`).
    */
-  public async forEnvironment(environment: cxapi.Environment, mode: Mode, options?: CredentialsOptions): Promise<ISDK> {
+  public async forEnvironment(
+    environment: cxapi.Environment,
+    mode: Mode,
+    options?: CredentialsOptions,
+  ): Promise<SdkForEnvironment> {
     const env = await this.resolveEnvironment(environment);
     const baseCreds = await this.obtainBaseCredentials(env.account, mode);
 
@@ -152,7 +184,12 @@ export class SdkProvider {
     // account.
     if (options?.assumeRoleArn === undefined) {
       if (baseCreds.source === 'incorrectDefault') { throw new Error(fmtObtainCredentialsError(env.account, baseCreds)); }
-      return new SDK(baseCreds.credentials, env.region, this.sdkOptions);
+
+      // Our current credentials must be valid and not expired. Confirm that before we get into doing
+      // actual CloudFormation calls, which might take a long time to hang.
+      const sdk = new SDK(baseCreds.credentials, env.region, this.sdkOptions);
+      await sdk.validateCredentials();
+      return { sdk, didAssumeRole: false };
     }
 
     // We will proceed to AssumeRole using whatever we've been given.
@@ -162,8 +199,12 @@ export class SdkProvider {
     // we can determine whether the AssumeRole call succeeds or not.
     try {
       await sdk.forceCredentialRetrieval();
-      return sdk;
+      return { sdk, didAssumeRole: true };
     } catch (e) {
+      if (isUnrecoverableAwsError(e)) {
+        throw e;
+      }
+
       // AssumeRole failed. Proceed and warn *if and only if* the baseCredentials were already for the right account
       // or returned from a plugin. This is to cover some current setups for people using plugins or preferring to
       // feed the CLI credentials which are sufficient by themselves. Prefer to assume the correct role if we can,
@@ -171,7 +212,7 @@ export class SdkProvider {
       if (baseCreds.source === 'correctDefault' || baseCreds.source === 'plugin') {
         debug(e.message);
         warning(`${fmtObtainedCredentials(baseCreds)} could not be used to assume '${options.assumeRoleArn}', but are for the right account. Proceeding anyway.`);
-        return new SDK(baseCreds.credentials, env.region, this.sdkOptions);
+        return { sdk: new SDK(baseCreds.credentials, env.region, this.sdkOptions), didAssumeRole: false };
       }
 
       throw e;
@@ -240,7 +281,15 @@ export class SdkProvider {
 
         return await new SDK(creds, this.defaultRegion, this.sdkOptions).currentAccount();
       } catch (e) {
-        debug('Unable to determine the default AWS account:', e);
+        // Treat 'ExpiredToken' specially. This is a common situation that people may find themselves in, and
+        // they are complaining about if we fail 'cdk synth' on them. We loudly complain in order to show that
+        // the current situation is probably undesirable, but we don't fail.
+        if ((e as any).code === 'ExpiredToken') {
+          warning('There are expired AWS credentials in your environment. The CDK app will synth without current account information.');
+          return undefined;
+        }
+
+        debug(`Unable to determine the default AWS account (${e.code}): ${e.message}`);
         return undefined;
       }
     });
@@ -374,46 +423,25 @@ function parseHttpOptions(options: SdkHttpOptions) {
   }
   config.customUserAgent = userAgent;
 
-  const proxyAddress = options.proxyAddress || httpsProxyFromEnvironment();
   const caBundlePath = options.caBundlePath || caBundlePathFromEnvironment();
-
-  if (proxyAddress && caBundlePath) {
-    throw new Error(`At the moment, cannot specify Proxy (${proxyAddress}) and CA Bundle (${caBundlePath}) at the same time. See https://github.com/aws/aws-cdk/issues/5804`);
-    // Maybe it's possible after all, but I've been staring at
-    // https://github.com/TooTallNate/node-proxy-agent/blob/master/index.js#L79
-    // a while now trying to figure out what to pass in so that the underlying Agent
-    // object will get the 'ca' argument. It's not trivial and I don't want to risk it.
-  }
-
-  if (proxyAddress) { // Ignore empty string on purpose
-    // https://aws.amazon.com/blogs/developer/using-the-aws-sdk-for-javascript-from-behind-a-proxy/
-    debug('Using proxy server: %s', proxyAddress);
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const ProxyAgent: any = require('proxy-agent');
-    config.httpOptions.agent = new ProxyAgent(proxyAddress);
-  }
   if (caBundlePath) {
     debug('Using CA bundle path: %s', caBundlePath);
-    config.httpOptions.agent = new https.Agent({
-      ca: readIfPossible(caBundlePath),
-      keepAlive: true,
-    });
+    (config.httpOptions as any).ca = readIfPossible(caBundlePath);
   }
+
+  if (options.proxyAddress) {
+    debug('Proxy server from command-line arguments: %s', options.proxyAddress);
+  }
+
+  // Configure the proxy agent. By default, this will use HTTPS?_PROXY and
+  // NO_PROXY environment variables to determine which proxy to use for each
+  // request.
+  //
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const ProxyAgent = require('proxy-agent');
+  config.httpOptions.agent = new ProxyAgent(options.proxyAddress);
 
   return config;
-}
-
-/**
- * Find and return the configured HTTPS proxy address
- */
-function httpsProxyFromEnvironment(): string | undefined {
-  if (process.env.https_proxy) {
-    return process.env.https_proxy;
-  }
-  if (process.env.HTTPS_PROXY) {
-    return process.env.HTTPS_PROXY;
-  }
-  return undefined;
 }
 
 /**
@@ -450,7 +478,11 @@ function readIfPossible(filename: string): string | undefined {
  * @see https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html#API_AssumeRole_RequestParameters
  */
 function safeUsername() {
-  return os.userInfo().username.replace(/[^\w+=,.@-]/g, '@');
+  try {
+    return os.userInfo().username.replace(/[^\w+=,.@-]/g, '@');
+  } catch (e) {
+    return 'noname';
+  }
 }
 
 /**

@@ -1,6 +1,6 @@
 import * as os from 'os';
 import * as path from 'path';
-import { AssetCode, Code, Runtime } from '@aws-cdk/aws-lambda';
+import { Architecture, AssetCode, Code, Runtime } from '@aws-cdk/aws-lambda';
 import * as cdk from '@aws-cdk/core';
 import { BundlingOptions } from './types';
 import { exec, findUp, getGoBuildVersion } from './util';
@@ -55,6 +55,11 @@ export interface BundlingProps extends BundlingOptions {
    * The runtime of the lambda function
    */
   readonly runtime: Runtime;
+
+  /**
+   * The system architecture of the lambda function
+   */
+  readonly architecture: Architecture;
 }
 
 /**
@@ -101,13 +106,17 @@ export class Bundling implements cdk.BundlingOptions {
 
     const cgoEnabled = props.cgoEnabled ? '1' : '0';
 
-    const environment = {
+    const environment: Record<string, string> = {
       CGO_ENABLED: cgoEnabled,
       GO111MODULE: 'on',
-      GOARCH: 'amd64',
+      GOARCH: props.architecture.dockerPlatform.split('/')[1],
       GOOS: 'linux',
       ...props.environment,
     };
+
+    if (props.goProxies) {
+      environment.GOPROXY = props.goProxies.join(',');
+    }
 
     // Docker bundling
     const shouldBuildImage = props.forcedDockerBundling || !Bundling.runsLocally;
@@ -117,6 +126,7 @@ export class Bundling implements cdk.BundlingOptions {
           ...props.buildArgs ?? {},
           IMAGE: Runtime.GO_1_X.bundlingImage.image, // always use the GO_1_X build image
         },
+        platform: props.architecture.dockerPlatform,
       })
       : cdk.DockerImage.fromRegistry('dummy'); // Do not build if we don't need to
 

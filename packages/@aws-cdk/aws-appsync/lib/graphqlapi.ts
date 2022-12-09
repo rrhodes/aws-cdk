@@ -1,13 +1,13 @@
+import { ICertificate } from '@aws-cdk/aws-certificatemanager';
 import { IUserPool } from '@aws-cdk/aws-cognito';
 import { ManagedPolicy, Role, IRole, ServicePrincipal, Grant, IGrantable } from '@aws-cdk/aws-iam';
-import { CfnResource, Duration, Expiration, IResolvable, Stack } from '@aws-cdk/core';
+import { IFunction } from '@aws-cdk/aws-lambda';
+import { ILogGroup, LogGroup, LogRetention, RetentionDays } from '@aws-cdk/aws-logs';
+import { ArnFormat, CfnResource, Duration, Expiration, IResolvable, Stack } from '@aws-cdk/core';
 import { Construct } from 'constructs';
-import { CfnApiKey, CfnGraphQLApi, CfnGraphQLSchema } from './appsync.generated';
+import { CfnApiKey, CfnGraphQLApi, CfnGraphQLSchema, CfnDomainName, CfnDomainNameApiAssociation } from './appsync.generated';
 import { IGraphqlApi, GraphqlApiBase } from './graphqlapi-base';
-import { Schema } from './schema';
-import { IIntermediateType } from './schema-base';
-import { ResolvableField } from './schema-field';
-import { ObjectType } from './schema-intermediate';
+import { ISchema } from './schema';
 
 /**
  * enum with all possible values for AppSync authorization type
@@ -29,6 +29,10 @@ export enum AuthorizationType {
    * OpenID Connect authorization type
    */
   OIDC = 'OPENID_CONNECT',
+  /**
+   * Lambda authorization type
+   */
+  LAMBDA = 'AWS_LAMBDA',
 }
 
 /**
@@ -58,6 +62,11 @@ export interface AuthorizationMode {
    * @default - none
    */
   readonly openIdConnectConfig?: OpenIdConnectConfig;
+  /**
+   * If authorizationType is `AuthorizationType.LAMBDA`, this option is required.
+   * @default - none
+   */
+  readonly lambdaAuthorizerConfig?: LambdaAuthorizerConfig;
 }
 
 /**
@@ -140,7 +149,7 @@ export interface OpenIdConnectConfig {
   /**
    * The client identifier of the Relying party at the OpenID identity provider.
    * A regular expression can be specified so AppSync can validate against multiple client identifiers at a time.
-   * @example - 'ABCD|CDEF' where ABCD and CDEF are two different clientId
+   * @example - 'ABCD|CDEF' // where ABCD and CDEF are two different clientId
    * @default - * (All)
    */
   readonly clientId?: string;
@@ -148,6 +157,33 @@ export interface OpenIdConnectConfig {
    * The issuer for the OIDC configuration. The issuer returned by discovery must exactly match the value of `iss` in the OIDC token.
    */
   readonly oidcProvider: string;
+}
+
+/**
+ * Configuration for Lambda authorization in AppSync. Note that you can only have a single AWS Lambda function configured to authorize your API.
+ */
+export interface LambdaAuthorizerConfig {
+  /**
+   * The authorizer lambda function.
+   *
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-appsync-graphqlapi-lambdaauthorizerconfig.html
+   */
+  readonly handler: IFunction;
+
+  /**
+   * How long the results are cached.
+   * Disable caching by setting this to 0.
+   *
+   * @default Duration.minutes(5)
+   */
+  readonly resultsCacheTtl?: Duration;
+
+  /**
+   * A regular expression for validation of tokens before the Lambda function is called.
+   *
+   * @default - no regex filter will be applied.
+   */
+  readonly validationRegex?: string;
 }
 
 /**
@@ -210,6 +246,31 @@ export interface LogConfig {
    * @default - None
    */
   readonly role?: IRole;
+
+  /**
+  * The number of days log events are kept in CloudWatch Logs.
+  * By default AppSync keeps the logs infinitely. When updating this property,
+  * unsetting it doesn't remove the log retention policy.
+  * To remove the retention policy, set the value to `INFINITE`
+  *
+  * @default RetentionDays.INFINITE
+  */
+  readonly retention?: RetentionDays
+}
+
+/**
+ * Domain name configuration for AppSync
+ */
+export interface DomainOptions {
+  /**
+   * The certificate to use with the domain name.
+   */
+  readonly certificate: ICertificate;
+
+  /**
+   * The actual domain name. For example, `api.example.com`.
+   */
+  readonly domainName: string;
 }
 
 /**
@@ -243,13 +304,23 @@ export interface GraphqlApiProps {
    * @default - schema will be generated code-first (i.e. addType, addObjectType, etc.)
    *
    */
-  readonly schema?: Schema;
+  readonly schema: ISchema;
   /**
    * A flag indicating whether or not X-Ray tracing is enabled for the GraphQL API.
    *
    * @default - false
    */
   readonly xrayEnabled?: boolean;
+
+  /**
+   * The domain name configuration for the GraphQL API
+   *
+   * The Route 53 hosted zone and CName DNS record must be configured in addition to this setting to
+   * enable custom domain URL
+   *
+   * @default - no domain name
+   */
+  readonly domainName?: DomainOptions;
 }
 
 /**
@@ -305,7 +376,7 @@ export class IamResource {
     return this.arns.map((arn) => Stack.of(api).formatArn({
       service: 'appsync',
       resource: `apis/${api.apiId}`,
-      sep: '/',
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
       resourceName: `${arn}`,
     }));
   }
@@ -349,7 +420,7 @@ export class GraphqlApi extends GraphqlApiBase {
     class Import extends GraphqlApiBase {
       public readonly apiId = attrs.graphqlApiId;
       public readonly arn = arn;
-      constructor (s: Construct, i: string) {
+      constructor(s: Construct, i: string) {
         super(s, i);
       }
     }
@@ -382,7 +453,7 @@ export class GraphqlApi extends GraphqlApiBase {
   /**
    * the schema attached to this api
    */
-  public readonly schema: Schema;
+  public readonly schema: ISchema;
 
   /**
    * The Authorization Types for this GraphQL Api
@@ -396,9 +467,15 @@ export class GraphqlApi extends GraphqlApiBase {
    */
   public readonly apiKey?: string;
 
+  /**
+   * the CloudWatch Log Group for this API
+   */
+  public readonly logGroup: ILogGroup;
+
   private schemaResource: CfnGraphQLSchema;
   private api: CfnGraphQLApi;
   private apiKeyResource?: CfnApiKey;
+  private domainNameResource?: CfnDomainName;
 
   constructor(scope: Construct, id: string, props: GraphqlApiProps) {
     super(scope, id);
@@ -408,7 +485,7 @@ export class GraphqlApi extends GraphqlApiBase {
     const additionalModes = props.authorizationConfig?.additionalAuthorizationModes ?? [];
     const modes = [defaultMode, ...additionalModes];
 
-    this.modes = modes.map((mode) => mode.authorizationType );
+    this.modes = modes.map((mode) => mode.authorizationType);
 
     this.validateAuthorizationProps(modes);
 
@@ -418,6 +495,7 @@ export class GraphqlApi extends GraphqlApiBase {
       logConfig: this.setupLogConfig(props.logConfig),
       openIdConnectConfig: this.setupOpenIdConnectConfig(defaultMode.openIdConnectConfig),
       userPoolConfig: this.setupUserPoolConfig(defaultMode.userPoolConfig),
+      lambdaAuthorizerConfig: this.setupLambdaAuthorizerConfig(defaultMode.lambdaAuthorizerConfig),
       additionalAuthenticationProviders: this.setupAdditionalAuthorizationModes(additionalModes),
       xrayEnabled: props.xrayEnabled,
     });
@@ -426,8 +504,22 @@ export class GraphqlApi extends GraphqlApiBase {
     this.arn = this.api.attrArn;
     this.graphqlUrl = this.api.attrGraphQlUrl;
     this.name = this.api.name;
-    this.schema = props.schema ?? new Schema();
-    this.schemaResource = this.schema.bind(this);
+    this.schema = props.schema;
+    this.schemaResource = new CfnGraphQLSchema(this, 'Schema', this.schema.bind(this));
+
+    if (props.domainName) {
+      this.domainNameResource = new CfnDomainName(this, 'DomainName', {
+        domainName: props.domainName.domainName,
+        certificateArn: props.domainName.certificate.certificateArn,
+        description: `domain for ${this.name} at ${this.graphqlUrl}`,
+      });
+      const domainNameAssociation = new CfnDomainNameApiAssociation(this, 'DomainAssociation', {
+        domainName: props.domainName.domainName,
+        apiId: this.apiId,
+      });
+
+      domainNameAssociation.addDependsOn(this.domainNameResource);
+    }
 
     if (modes.some((mode) => mode.authorizationType === AuthorizationType.API_KEY)) {
       const config = modes.find((mode: AuthorizationMode) => {
@@ -437,6 +529,27 @@ export class GraphqlApi extends GraphqlApiBase {
       this.apiKeyResource.addDependsOn(this.schemaResource);
       this.apiKey = this.apiKeyResource.attrApiKey;
     }
+
+    if (modes.some((mode) => mode.authorizationType === AuthorizationType.LAMBDA)) {
+      const config = modes.find((mode: AuthorizationMode) => {
+        return mode.authorizationType === AuthorizationType.LAMBDA && mode.lambdaAuthorizerConfig;
+      })?.lambdaAuthorizerConfig;
+      config?.handler.addPermission('appsync', {
+        principal: new ServicePrincipal('appsync.amazonaws.com'),
+        action: 'lambda:InvokeFunction',
+      });
+    }
+
+    const logGroupName = `/aws/appsync/apis/${this.apiId}`;
+
+    this.logGroup = LogGroup.fromLogGroupName(this, 'LogGroup', logGroupName);
+
+    if (props.logConfig?.retention) {
+      new LogRetention(this, 'LogRetention', {
+        logGroupName: this.logGroup.logGroupName,
+        retention: props.logConfig.retention,
+      });
+    };
   }
 
   /**
@@ -490,12 +603,18 @@ export class GraphqlApi extends GraphqlApiBase {
   }
 
   private validateAuthorizationProps(modes: AuthorizationMode[]) {
+    if (modes.filter((mode) => mode.authorizationType === AuthorizationType.LAMBDA).length > 1) {
+      throw new Error('You can only have a single AWS Lambda function configured to authorize your API.');
+    }
     modes.map((mode) => {
       if (mode.authorizationType === AuthorizationType.OIDC && !mode.openIdConnectConfig) {
-        throw new Error('Missing default OIDC Configuration');
+        throw new Error('Missing OIDC Configuration');
       }
       if (mode.authorizationType === AuthorizationType.USER_POOL && !mode.userPoolConfig) {
-        throw new Error('Missing default OIDC Configuration');
+        throw new Error('Missing User Pool Configuration');
+      }
+      if (mode.authorizationType === AuthorizationType.LAMBDA && !mode.lambdaAuthorizerConfig) {
+        throw new Error('Missing Lambda Configuration');
       }
     });
     if (modes.filter((mode) => mode.authorizationType === AuthorizationType.API_KEY).length > 1) {
@@ -524,10 +643,11 @@ export class GraphqlApi extends GraphqlApiBase {
         ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSAppSyncPushToCloudWatchLogs'),
       ],
     }).roleArn;
+    const fieldLogLevel: FieldLogLevel = config.fieldLogLevel ?? FieldLogLevel.NONE;
     return {
       cloudWatchLogsRoleArn: logsRoleArn,
       excludeVerboseContent: config.excludeVerboseContent,
-      fieldLogLevel: config.fieldLogLevel,
+      fieldLogLevel: fieldLogLevel,
     };
   }
 
@@ -545,9 +665,18 @@ export class GraphqlApi extends GraphqlApiBase {
     if (!config) return undefined;
     return {
       userPoolId: config.userPool.userPoolId,
-      awsRegion: config.userPool.stack.region,
+      awsRegion: config.userPool.env.region,
       appIdClientRegex: config.appIdClientRegex,
       defaultAction: config.defaultAction || UserPoolDefaultAction.ALLOW,
+    };
+  }
+
+  private setupLambdaAuthorizerConfig(config?: LambdaAuthorizerConfig) {
+    if (!config) return undefined;
+    return {
+      authorizerResultTtlInSeconds: config.resultsCacheTtl?.toSeconds(),
+      authorizerUri: config.handler.functionArn,
+      identityValidationExpression: config.validationRegex,
     };
   }
 
@@ -558,6 +687,7 @@ export class GraphqlApi extends GraphqlApiBase {
         authenticationType: mode.authorizationType,
         userPoolConfig: this.setupUserPoolConfig(mode.userPoolConfig),
         openIdConnectConfig: this.setupOpenIdConnectConfig(mode.openIdConnectConfig),
+        lambdaAuthorizerConfig: this.setupLambdaAuthorizerConfig(mode.lambdaAuthorizerConfig),
       },
     ], []);
   }
@@ -575,70 +705,12 @@ export class GraphqlApi extends GraphqlApiBase {
   }
 
   /**
-   * Escape hatch to append to Schema as desired. Will always result
-   * in a newline.
-   *
-   * @param addition the addition to add to schema
-   * @param delimiter the delimiter between schema and addition
-   * @default - ''
-   *
+   * The AppSyncDomainName of the associated custom domain
    */
-  public addToSchema(addition: string, delimiter?: string): void {
-    this.schema.addToSchema(addition, delimiter);
-  }
-
-  /**
-   * Add type to the schema
-   *
-   * @param type the intermediate type to add to the schema
-   *
-   */
-  public addType(type: IIntermediateType): IIntermediateType {
-    return this.schema.addType(type);
-  }
-
-  /**
-   * Add a query field to the schema's Query. CDK will create an
-   * Object Type called 'Query'. For example,
-   *
-   * type Query {
-   *   fieldName: Field.returnType
-   * }
-   *
-   * @param fieldName the name of the query
-   * @param field the resolvable field to for this query
-   */
-  public addQuery(fieldName: string, field: ResolvableField): ObjectType {
-    return this.schema.addQuery(fieldName, field);
-  }
-
-  /**
-   * Add a mutation field to the schema's Mutation. CDK will create an
-   * Object Type called 'Mutation'. For example,
-   *
-   * type Mutation {
-   *   fieldName: Field.returnType
-   * }
-   *
-   * @param fieldName the name of the Mutation
-   * @param field the resolvable field to for this Mutation
-   */
-  public addMutation(fieldName: string, field: ResolvableField): ObjectType {
-    return this.schema.addMutation(fieldName, field);
-  }
-
-  /**
-   * Add a subscription field to the schema's Subscription. CDK will create an
-   * Object Type called 'Subscription'. For example,
-   *
-   * type Subscription {
-   *   fieldName: Field.returnType
-   * }
-   *
-   * @param fieldName the name of the Subscription
-   * @param field the resolvable field to for this Subscription
-   */
-  public addSubscription(fieldName: string, field: ResolvableField): ObjectType {
-    return this.schema.addSubscription(fieldName, field);
+  public get appSyncDomainName(): string {
+    if (!this.domainNameResource) {
+      throw new Error('Cannot retrieve the appSyncDomainName without a domainName configuration');
+    }
+    return this.domainNameResource.attrAppSyncDomainName;
   }
 }

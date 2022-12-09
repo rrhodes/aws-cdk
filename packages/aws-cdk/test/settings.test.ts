@@ -90,20 +90,42 @@ test('bundling stacks defaults to an empty list', () => {
   expect(settings.get(['bundlingStacks'])).toEqual([]);
 });
 
-test('bundling stacks defaults to * for deploy', () => {
+test('bundling stacks defaults to ** for deploy', () => {
   // GIVEN
   const settings = Settings.fromCommandLineArguments({
     _: [Command.DEPLOY],
   });
 
   // THEN
-  expect(settings.get(['bundlingStacks'])).toEqual(['*']);
+  expect(settings.get(['bundlingStacks'])).toEqual(['**']);
+});
+
+test('bundling stacks defaults to ** for watch', () => {
+  // GIVEN
+  const settings = Settings.fromCommandLineArguments({
+    _: [Command.WATCH],
+  });
+
+  // THEN
+  expect(settings.get(['bundlingStacks'])).toEqual(['**']);
 });
 
 test('bundling stacks with deploy exclusively', () => {
   // GIVEN
   const settings = Settings.fromCommandLineArguments({
     _: [Command.DEPLOY],
+    exclusively: true,
+    STACKS: ['cool-stack'],
+  });
+
+  // THEN
+  expect(settings.get(['bundlingStacks'])).toEqual(['cool-stack']);
+});
+
+test('bundling stacks with watch exclusively', () => {
+  // GIVEN
+  const settings = Settings.fromCommandLineArguments({
+    _: [Command.WATCH],
     exclusively: true,
     STACKS: ['cool-stack'],
   });
@@ -121,4 +143,15 @@ test('should include outputs-file in settings', () => {
 
   // THEN
   expect(settings.get(['outputsFile'])).toEqual('my-outputs-file.json');
+});
+
+test('providing a build arg', () => {
+  // GIVEN
+  const settings = Settings.fromCommandLineArguments({
+    _: [Command.SYNTH],
+    build: 'mvn package',
+  });
+
+  // THEN
+  expect(settings.get(['build'])).toEqual('mvn package');
 });

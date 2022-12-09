@@ -28,8 +28,8 @@ using a Go version >= 1.11 and is using [Go modules](https://golang.org/ref/mod)
 Define a `GoFunction`:
 
 ```ts
-new lambda.GoFunction(this, 'handler', {
-  entry: 'app/cmd/api'
+new go.GoFunction(this, 'handler', {
+  entry: 'app/cmd/api',
 });
 ```
 
@@ -99,20 +99,20 @@ generally fall into two scenarios:
    If you are not vendoring then `go build` will be run without `-mod=vendor`
     since the default behavior is to download dependencies
 
-All other properties of `lambda.Function` are supported, see also the [AWS Lambda construct library](https://github.com/aws/aws-cdk/tree/master/packages/%40aws-cdk/aws-lambda).
+All other properties of `lambda.Function` are supported, see also the [AWS Lambda construct library](https://github.com/aws/aws-cdk/tree/main/packages/%40aws-cdk/aws-lambda).
 
 ## Environment
 
 By default the following environment variables are set for you:
 
 * `GOOS=linux`
-* `GOARCH=amd64`
+* `GOARCH`: based on the target architecture of the Lambda function
 * `GO111MODULE=on`
 
 Use the `environment` prop to define additional environment variables when go runs:
 
 ```ts
-new lambda.GoFunction(this, 'handler', {
+new go.GoFunction(this, 'handler', {
   entry: 'app/cmd/api',
   bundling: {
     environment: {
@@ -124,7 +124,7 @@ new lambda.GoFunction(this, 'handler', {
 
 ## Local Bundling
 
-If `Go` is installed locally and the version is >= `go1.11` then it will be used to bundle your code in your environment. Otherwise, bundling will happen in a [Lambda compatible Docker container](https://hub.docker.com/layers/lambci/lambda/build-go1.x/images/sha256-e14dab718ed0bb06b2243825c5993e494a6969de7c01754ad7e80dacfce9b0cf?context=explore). 
+If `Go` is installed locally and the version is >= `go1.11` then it will be used to bundle your code in your environment. Otherwise, bundling will happen in a [Lambda compatible Docker container](https://gallery.ecr.aws/sam/build-go1.x) with the Docker platform based on the target architecture of the Lambda function.
 
 For macOS the recommended approach is to install `Go` as Docker volume performance is really poor.
 
@@ -138,7 +138,7 @@ To force bundling in a docker container even if `Go` is available in your enviro
 Use the `buildArgs` prop to pass build arguments when building the bundling image:
 
 ```ts
-new lambda.GoFunction(this, 'handler', {
+new go.GoFunction(this, 'handler', {
   entry: 'app/cmd/api',
   bundling: {
     buildArgs: {
@@ -151,10 +151,10 @@ new lambda.GoFunction(this, 'handler', {
 Use the `bundling.dockerImage` prop to use a custom bundling image:
 
 ```ts
-new lambda.GoFunction(this, 'handler', {
+new go.GoFunction(this, 'handler', {
   entry: 'app/cmd/api',
   bundling: {
-    dockerImage: cdk.DockerImage.fromBuild('/path/to/Dockerfile'),
+    dockerImage: DockerImage.fromBuild('/path/to/Dockerfile'),
   },
 });
 ```
@@ -162,10 +162,23 @@ new lambda.GoFunction(this, 'handler', {
 Use the `bundling.goBuildFlags` prop to pass additional build flags to `go build`:
 
 ```ts
-new lambda.GoFunction(this, 'handler', {
+new go.GoFunction(this, 'handler', {
   entry: 'app/cmd/api',
   bundling: {
     goBuildFlags: ['-ldflags "-s -w"'],
+  },
+});
+```
+
+By default this construct doesn't use any Go module proxies. This is contrary to
+a standard Go installation, which would use the Google proxy by default. To
+recreate that behavior, do the following:
+
+```ts
+new go.GoFunction(this, 'GoFunction', {
+  entry: 'app/cmd/api',
+  bundling: {
+    goProxies: [go.GoFunction.GOOGLE_GOPROXY, 'direct'],
   },
 });
 ```
@@ -174,8 +187,10 @@ new lambda.GoFunction(this, 'handler', {
 
 It is  possible to run additional commands by specifying the `commandHooks` prop:
 
-```ts
-new lambda.GoFunction(this, 'handler', {
+```text
+// This example only available in TypeScript
+// Run additional commands on a GoFunction via `commandHooks` property
+new go.GoFunction(this, 'handler', {
   bundling: {
     commandHooks: {
       // run tests
@@ -208,7 +223,7 @@ By default this parameter is set to `AssetHashType.OUTPUT` which means that the 
 
 If you specify `AssetHashType.SOURCE`, the CDK will calculate the asset hash by looking at the folder
 that contains your `go.mod` file. If you are deploying a single Lambda function, or you want to redeploy
-all of your functions if anything changes, then `AssetHashType.SOURCE` will probaby work.
+all of your functions if anything changes, then `AssetHashType.SOURCE` will probably work.
 
 
 For example, if my app looked like this:
@@ -230,7 +245,7 @@ will determine that the protect root is `lambda-app` (it contains the `go.mod` f
 Since I only have a single Lambda function, and any update to files within the `lambda-app` directory
 should trigger a new deploy, I could specify `AssetHashType.SOURCE`.
 
-On the other hand, if I had a project that deployed mmultiple Lambda functions, for example:
+On the other hand, if I had a project that deployed multiple Lambda functions, for example:
 
 ```bash
 lamda-app

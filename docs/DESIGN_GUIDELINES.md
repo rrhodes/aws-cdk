@@ -126,8 +126,8 @@ The AWS Construct Library, which is shipped as part of the AWS CDK constructs
 representing AWS resources.
 
 The AWS Construct Library has multiple layers of constructs, beginning
-with low-level constructs, which we call _CFN Resources_ (or L1, short for
-"level 1") or CFN Resources (short for CloudFormation). These constructs
+with low-level constructs, which we call _CFN Resources_ (short for
+CloudFormation resources), or L1 (short for "level 1"). These constructs
 directly represent all resources available in AWS CloudFormation. CFN Resources
 are periodically generated from the AWS CloudFormation Resource
 Specification. They are named **Cfn**_Xyz_, where _Xyz_ is name of the
@@ -456,7 +456,7 @@ A prop should be *required* only if there is no possible sensible default value
 that can be provided *or calculated*.
 
 Sensible defaults have a tremendous impact on the developer experience. They
-offer a quick way to get started with minimal cognitive, but do not limit users
+offer a quick way to get started with minimal cognitive load, but do not limit users
 from harnessing the full power of the resource, and customizing its behavior.
 
 > A good way to determine what's the right sensible default is to refer to the
@@ -610,14 +610,14 @@ A pattern for an "Enum-like Class" should be used in such cases:
 
 ```ts
 export interface MyProps {
-  option: MyOption;
+  readonly option: MyOption;
 }
 
 export class MyOption {
   public static COMMON_OPTION_1 = new MyOption('common.option-1');
   public static COMMON_OPTION_2 = new MyOption('common.option-2');
 
-  public MyOption(public readonly customValue: string) { }
+  public constructor(public readonly customValue: string) { }
 }
 ```
 
@@ -644,7 +644,7 @@ export class MyOption {
 
   // 'protected' iso. 'private' so that someone that really wants to can still
   // do subclassing. But maybe might as well be private.
-  protected MyOption(public readonly value: string) { }
+  protected constructor(public readonly value: string) { }
 }
 
 // Usage
@@ -671,7 +671,7 @@ new lambda.Function(this, 'MyFunction', {
   code: lambda.Code.bucket(myBucket, 'bundle.zip'), // or
   code: lambda.Code.inline('code')
   // etc
-}
+})
 ```
 
 ### Attributes
@@ -754,10 +754,10 @@ interface IFoo extends IConstruct {
 class Foo extends Construct implements IFoo {
   public bar() { }
 
-  /** @mutating */
+  @config
   public goo() { }
 
-  public mutateMe() { } // ERROR! missing "@mutating" or missing on IFoo
+  public mutateMe() { } // ERROR! missing "@config" or missing on IFoo
 }
 ```
 

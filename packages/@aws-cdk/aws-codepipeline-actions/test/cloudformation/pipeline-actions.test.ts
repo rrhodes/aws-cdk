@@ -4,14 +4,13 @@ import * as events from '@aws-cdk/aws-events';
 import * as iam from '@aws-cdk/aws-iam';
 import * as s3 from '@aws-cdk/aws-s3';
 import * as cdk from '@aws-cdk/core';
-import * as constructs from 'constructs';
+import { Construct, IConstruct, Node } from 'constructs';
 import * as _ from 'lodash';
-import { nodeunitShim, Test } from 'nodeunit-shim';
 import * as cpactions from '../../lib';
 
-nodeunitShim({
-  CreateReplaceChangeSet: {
-    'works'(test: Test) {
+describe('Pipeline Actions', () => {
+  describe('CreateReplaceChangeSet', () => {
+    test('works', (done) => {
       const app = new cdk.App();
       const stack = new cdk.Stack(app, 'Stack');
       const pipelineRole = new RoleDouble(stack, 'PipelineRole');
@@ -30,29 +29,29 @@ nodeunitShim({
 
       app.synth();
 
-      _assertPermissionGranted(test, stack, pipelineRole.statements, 'iam:PassRole', action.deploymentRole.roleArn);
+      _assertPermissionGranted(done, stack, pipelineRole.statements, 'iam:PassRole', action.deploymentRole.roleArn);
 
       const stackArn = _stackArn('MyStack', stack);
       const changeSetCondition = { StringEqualsIfExists: { 'cloudformation:ChangeSetName': 'MyChangeSet' } };
-      _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DescribeStacks', stackArn, changeSetCondition);
-      _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DescribeChangeSet', stackArn, changeSetCondition);
-      _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:CreateChangeSet', stackArn, changeSetCondition);
-      _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DeleteChangeSet', stackArn, changeSetCondition);
+      _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DescribeStacks', stackArn, changeSetCondition);
+      _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DescribeChangeSet', stackArn, changeSetCondition);
+      _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:CreateChangeSet', stackArn, changeSetCondition);
+      _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DeleteChangeSet', stackArn, changeSetCondition);
 
       // TODO: revert "as any" once we move all actions into a single package.
-      test.deepEqual(stage.fullActions[0].actionProperties.inputs, [artifact],
-        'The input was correctly registered');
+      expect(stage.fullActions[0].actionProperties.inputs).toEqual([artifact]);
 
-      _assertActionMatches(test, stack, stage.fullActions, 'CloudFormation', 'Deploy', {
+      _assertActionMatches(done, stack, stage.fullActions, 'CloudFormation', 'Deploy', {
         ActionMode: 'CHANGE_SET_CREATE_REPLACE',
         StackName: 'MyStack',
         ChangeSetName: 'MyChangeSet',
       });
 
-      test.done();
-    },
+      done();
 
-    'uses a single permission statement if the same ChangeSet name is used'(test: Test) {
+    });
+
+    test('uses a single permission statement if the same ChangeSet name is used', () => {
       const stack = new cdk.Stack();
       const pipelineRole = new RoleDouble(stack, 'PipelineRole');
       const artifact = new codepipeline.Artifact('TestArtifact');
@@ -76,8 +75,9 @@ nodeunitShim({
         ],
       });
 
-      test.deepEqual(
+      expect(
         stack.resolve(pipelineRole.statements.map(s => s.toStatementJson())),
+      ).toEqual(
         [
           {
             Action: 'iam:PassRole',
@@ -106,12 +106,12 @@ nodeunitShim({
         ],
       );
 
-      test.done();
-    },
-  },
 
-  ExecuteChangeSet: {
-    'works'(test: Test) {
+    });
+  });
+
+  describe('ExecuteChangeSet', () => {
+    test('works', (done) => {
       const stack = new cdk.Stack();
       const pipelineRole = new RoleDouble(stack, 'PipelineRole');
       const stage = new StageDouble({
@@ -126,19 +126,19 @@ nodeunitShim({
       });
 
       const stackArn = _stackArn('MyStack', stack);
-      _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:ExecuteChangeSet', stackArn,
+      _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:ExecuteChangeSet', stackArn,
         { StringEqualsIfExists: { 'cloudformation:ChangeSetName': 'MyChangeSet' } });
 
-      _assertActionMatches(test, stack, stage.fullActions, 'CloudFormation', 'Deploy', {
+      _assertActionMatches(done, stack, stage.fullActions, 'CloudFormation', 'Deploy', {
         ActionMode: 'CHANGE_SET_EXECUTE',
         StackName: 'MyStack',
         ChangeSetName: 'MyChangeSet',
       });
 
-      test.done();
-    },
+      done();
+    });
 
-    'uses a single permission statement if the same ChangeSet name is used'(test: Test) {
+    test('uses a single permission statement if the same ChangeSet name is used', () => {
       const stack = new cdk.Stack();
       const pipelineRole = new RoleDouble(stack, 'PipelineRole');
       new StageDouble({
@@ -157,8 +157,9 @@ nodeunitShim({
         ],
       });
 
-      test.deepEqual(
+      expect(
         stack.resolve(pipelineRole.statements.map(s => s.toStatementJson())),
+      ).toEqual(
         [
           {
             Action: [
@@ -178,11 +179,11 @@ nodeunitShim({
         ],
       );
 
-      test.done();
-    },
-  },
 
-  'the CreateUpdateStack Action sets the DescribeStack*, Create/Update/DeleteStack & PassRole permissions'(test: Test) {
+    });
+  });
+
+  test('the CreateUpdateStack Action sets the DescribeStack*, Create/Update/DeleteStack & PassRole permissions', (done) => {
     const stack = new cdk.Stack();
     const pipelineRole = new RoleDouble(stack, 'PipelineRole');
     const action = new cpactions.CloudFormationCreateUpdateStackAction({
@@ -198,17 +199,17 @@ nodeunitShim({
     });
     const stackArn = _stackArn('MyStack', stack);
 
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DescribeStack*', stackArn);
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:CreateStack', stackArn);
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:UpdateStack', stackArn);
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DeleteStack', stackArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DescribeStack*', stackArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:CreateStack', stackArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:UpdateStack', stackArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DeleteStack', stackArn);
 
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'iam:PassRole', action.deploymentRole.roleArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'iam:PassRole', action.deploymentRole.roleArn);
 
-    test.done();
-  },
+    done();
+  });
 
-  'the DeleteStack Action sets the DescribeStack*, DeleteStack & PassRole permissions'(test: Test) {
+  test('the DeleteStack Action sets the DescribeStack*, DeleteStack & PassRole permissions', (done) => {
     const stack = new cdk.Stack();
     const pipelineRole = new RoleDouble(stack, 'PipelineRole');
     const action = new cpactions.CloudFormationDeleteStackAction({
@@ -222,13 +223,13 @@ nodeunitShim({
     });
     const stackArn = _stackArn('MyStack', stack);
 
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DescribeStack*', stackArn);
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'cloudformation:DeleteStack', stackArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DescribeStack*', stackArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'cloudformation:DeleteStack', stackArn);
 
-    _assertPermissionGranted(test, stack, pipelineRole.statements, 'iam:PassRole', action.deploymentRole.roleArn);
+    _assertPermissionGranted(done, stack, pipelineRole.statements, 'iam:PassRole', action.deploymentRole.roleArn);
 
-    test.done();
-  },
+    done();
+  });
 });
 
 interface PolicyStatementJson {
@@ -239,7 +240,7 @@ interface PolicyStatementJson {
 }
 
 function _assertActionMatches(
-  test: Test,
+  done: jest.DoneCallback,
   stack: cdk.Stack,
   actions: FullAction[],
   provider: string,
@@ -256,8 +257,9 @@ function _assertActionMatches(
       configuration: stack.resolve(a.actionConfig.configuration),
     }),
   ), null, 2);
-  test.ok(_hasAction(stack, actions, provider, category, configuration),
-    `Expected to find an action with provider ${provider}, category ${category}${configurationStr}, but found ${actionsStr}`);
+  if (!_hasAction(stack, actions, provider, category, configuration)) {
+    done.fail(`Expected to find an action with provider ${provider}, category ${category}${configurationStr}, but found ${actionsStr}`);
+  }
 }
 
 function _hasAction(
@@ -280,7 +282,7 @@ function _hasAction(
 }
 
 function _assertPermissionGranted(
-  test: Test,
+  done: jest.DoneCallback,
   stack: cdk.Stack,
   statements: iam.PolicyStatement[],
   action: string,
@@ -291,8 +293,9 @@ function _assertPermissionGranted(
     : '';
   const resolvedStatements = stack.resolve(statements.map(s => s.toStatementJson()));
   const statementsStr = JSON.stringify(resolvedStatements, null, 2);
-  test.ok(_grantsPermission(stack, resolvedStatements, action, resource, conditions),
-    `Expected to find a statement granting ${action} on ${JSON.stringify(stack.resolve(resource))}${conditionStr}, found:\n${statementsStr}`);
+  if (!_grantsPermission(stack, resolvedStatements, action, resource, conditions)) {
+    done.fail(`Expected to find a statement granting ${action} on ${JSON.stringify(stack.resolve(resource))}${conditionStr}, found:\n${statementsStr}`);
+  }
 }
 
 function _grantsPermission(stack: cdk.Stack, statements: PolicyStatementJson[], action: string, resource: string, conditions?: any) {
@@ -316,7 +319,7 @@ function _isOrContains(stack: cdk.Stack, entity: string | string[], value: strin
   return false;
 }
 
-function _stackArn(stackName: string, scope: constructs.IConstruct): string {
+function _stackArn(stackName: string, scope: IConstruct): string {
   return cdk.Stack.of(scope).formatArn({
     service: 'cloudformation',
     resource: 'stack',
@@ -330,7 +333,7 @@ class PipelineDouble extends cdk.Resource implements codepipeline.IPipeline {
   public readonly role: iam.Role;
   public readonly artifactBucket: s3.IBucket;
 
-  constructor(scope: constructs.Construct, id: string, { pipelineName, role }: { pipelineName?: string, role: iam.Role }) {
+  constructor(scope: Construct, id: string, { pipelineName, role }: { pipelineName?: string, role: iam.Role }) {
     super(scope, id);
     this.pipelineName = pipelineName || 'TestPipeline';
     this.pipelineArn = cdk.Stack.of(this).formatArn({ service: 'codepipeline', resource: 'pipeline', resourceName: this.pipelineName });
@@ -380,7 +383,7 @@ class PipelineDouble extends cdk.Resource implements codepipeline.IPipeline {
     throw new Error('Method not implemented.');
   }
   public bindAsNotificationRuleSource(
-    _scope: constructs.Construct,
+    _scope: Construct,
   ): notifications.NotificationRuleSourceConfig {
     throw new Error('Method not implemented.');
   }
@@ -400,7 +403,7 @@ class StageDouble implements codepipeline.IStage {
   public readonly actions: codepipeline.IAction[] = [];
   public readonly fullActions: FullAction[];
 
-  public get node(): cdk.ConstructNode {
+  public get node(): Node {
     throw new Error('StageDouble is not a real construct');
   }
 
@@ -408,10 +411,10 @@ class StageDouble implements codepipeline.IStage {
     this.stageName = name || 'TestStage';
     this.pipeline = pipeline;
 
-    const stageParent = new cdk.Construct(pipeline, this.stageName);
+    const stageParent = new Construct(pipeline, this.stageName);
     const fullActions = new Array<FullAction>();
     for (const action of actions) {
-      const actionParent = new cdk.Construct(stageParent, action.actionProperties.actionName);
+      const actionParent = new Construct(stageParent, action.actionProperties.actionName);
       fullActions.push(new FullAction(action.actionProperties, action.bind(actionParent, this, {
         role: pipeline.role,
         bucket: pipeline.artifactBucket,
@@ -433,7 +436,7 @@ class StageDouble implements codepipeline.IStage {
 class RoleDouble extends iam.Role {
   public readonly statements = new Array<iam.PolicyStatement>();
 
-  constructor(scope: constructs.Construct, id: string, props: iam.RoleProps = { assumedBy: new iam.ServicePrincipal('test') }) {
+  constructor(scope: Construct, id: string, props: iam.RoleProps = { assumedBy: new iam.ServicePrincipal('test') }) {
     super(scope, id, props);
   }
 

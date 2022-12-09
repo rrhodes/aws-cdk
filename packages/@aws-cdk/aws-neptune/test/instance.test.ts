@@ -1,4 +1,5 @@
-import { expect as expectCDK, haveOutput, haveResource, ResourcePart } from '@aws-cdk/assert-internal';
+import { Template } from '@aws-cdk/assertions';
+import * as cloudwatch from '@aws-cdk/aws-cloudwatch';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as cdk from '@aws-cdk/core';
 import * as constructs from 'constructs';
@@ -17,14 +18,14 @@ describe('DatabaseInstance', () => {
     });
 
     // THEN
-    expectCDK(stack).to(haveResource('AWS::Neptune::DBInstance', {
+    Template.fromStack(stack).hasResource('AWS::Neptune::DBInstance', {
       Properties: {
         DBClusterIdentifier: { Ref: 'DatabaseB269D8BB' },
         DBInstanceClass: 'db.r5.large',
       },
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',
-    }, ResourcePart.CompleteDefinition));
+    });
   });
 
   test('check that the endpoint works', () => {
@@ -43,9 +44,9 @@ describe('DatabaseInstance', () => {
     });
 
     // THEN
-    expectCDK(stack).to(haveOutput({
-      exportName,
-      outputValue: {
+    Template.fromStack(stack).hasOutput(exportName, {
+      Export: { Name: exportName },
+      Value: {
         'Fn::Join': [
           '',
           [
@@ -55,7 +56,7 @@ describe('DatabaseInstance', () => {
           ],
         ],
       },
-    }));
+    });
   });
 
   test('check importing works as expected', () => {
@@ -78,10 +79,10 @@ describe('DatabaseInstance', () => {
     });
 
     // THEN
-    expectCDK(stack).to(haveOutput({
-      exportName: endpointExportName,
-      outputValue: `${instanceEndpointAddress}:${port}`,
-    }));
+    Template.fromStack(stack).hasOutput('EndpointOutput', {
+      Export: { Name: endpointExportName },
+      Value: `${instanceEndpointAddress}:${port}`,
+    });
   });
 
   test('instance with parameter group', () => {
@@ -102,9 +103,9 @@ describe('DatabaseInstance', () => {
     });
 
     // THEN
-    expectCDK(stack).to(haveResource('AWS::Neptune::DBInstance', {
+    Template.fromStack(stack).hasResourceProperties('AWS::Neptune::DBInstance', {
       DBParameterGroupName: { Ref: 'ParamsA8366201' },
-    }));
+    });
   });
 
   test('instance type from CfnParameter', () => {
@@ -130,15 +131,55 @@ describe('DatabaseInstance', () => {
     });
 
     // THEN
-    expectCDK(stack).to(haveResource('AWS::Neptune::DBInstance', {
+    Template.fromStack(stack).hasResourceProperties('AWS::Neptune::DBInstance', {
       DBInstanceClass: {
         Ref: 'NeptuneInstaneType',
       },
-    }));
+    });
   });
 
   test('instance type from string throws if missing db prefix', () => {
     expect(() => { InstanceType.of('r5.xlarge');}).toThrowError(/instance type must start with 'db.'/);
+  });
+
+  test('metric - constructs metric with correct namespace and dimension and inputs', () => {
+    // GIVEN
+    const stack = testStack();
+    const instance = new DatabaseInstance(stack, 'Instance', {
+      cluster: stack.cluster,
+      instanceType: InstanceType.R5_LARGE,
+    });
+
+    // WHEN
+    const metric = instance.metric('SparqlRequestsPerSec');
+    new cloudwatch.Alarm(stack, 'Alarm', {
+      evaluationPeriods: 1,
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      metric: metric,
+    });
+
+    // THEN
+    expect(metric).toEqual(new cloudwatch.Metric({
+      namespace: 'AWS/Neptune',
+      dimensionsMap: {
+        DBInstanceIdentifier: instance.instanceIdentifier,
+      },
+      metricName: 'SparqlRequestsPerSec',
+    }));
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/Neptune',
+      MetricName: 'SparqlRequestsPerSec',
+      Dimensions: [
+        {
+          Name: 'DBInstanceIdentifier',
+          Value: stack.resolve(instance.instanceIdentifier),
+        },
+      ],
+      ComparisonOperator: 'LessThanThreshold',
+      EvaluationPeriods: 1,
+      Threshold: 1,
+    });
   });
 });
 
@@ -160,6 +201,5 @@ class TestStack extends cdk.Stack {
 }
 
 function testStack() {
-  const stack = new TestStack(undefined, undefined, { env: { account: '12345', region: 'us-test-1' } });
-  return stack;
+  return new TestStack(undefined, undefined, { env: { account: '12345', region: 'us-test-1' } });
 }

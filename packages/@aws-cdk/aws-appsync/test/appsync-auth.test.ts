@@ -1,6 +1,7 @@
-import '@aws-cdk/assert-internal/jest';
 import * as path from 'path';
+import { Template } from '@aws-cdk/assertions';
 import * as cognito from '@aws-cdk/aws-cognito';
+import * as lambda from '@aws-cdk/aws-lambda';
 import * as cdk from '@aws-cdk/core';
 import * as appsync from '../lib';
 
@@ -15,18 +16,18 @@ describe('AppSync API Key Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
     });
 
     // THEN
-    expect(stack).toHaveResource('AWS::AppSync::ApiKey');
+    Template.fromStack(stack).resourceCountIs('AWS::AppSync::ApiKey', 1);
   });
 
   test('AppSync creates api key from additionalAuthorizationModes', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
         additionalAuthorizationModes: [
@@ -36,28 +37,28 @@ describe('AppSync API Key Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResource('AWS::AppSync::ApiKey');
+    Template.fromStack(stack).resourceCountIs('AWS::AppSync::ApiKey', 1);
   });
 
   test('AppSync does not create unspecified api key from additionalAuthorizationModes', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
       },
     });
 
     // THEN
-    expect(stack).not.toHaveResource('AWS::AppSync::ApiKey');
+    Template.fromStack(stack).resourceCountIs('AWS::AppSync::ApiKey', 0);
   });
 
   test('appsync does not create unspecified api key with empty additionalAuthorizationModes', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
         additionalAuthorizationModes: [],
@@ -65,14 +66,14 @@ describe('AppSync API Key Authorization', () => {
     });
 
     // THEN
-    expect(stack).not.toHaveResource('AWS::AppSync::ApiKey');
+    Template.fromStack(stack).resourceCountIs('AWS::AppSync::ApiKey', 0);
   });
 
   test('appsync creates configured api key with additionalAuthorizationModes', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
         additionalAuthorizationModes: [{
@@ -83,29 +84,30 @@ describe('AppSync API Key Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::ApiKey', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::ApiKey', {
       Description: 'Custom Description',
     });
   });
 
   test('apiKeyConfig creates default with valid expiration date', () => {
-    const expirationDate: number = cdk.Expiration.after(cdk.Duration.days(10)).toEpoch();
+    const expires = cdk.Expiration.after(cdk.Duration.days(10));
+    const expirationDate: number = expires.toEpoch();
 
     // WHEN
     new appsync.GraphqlApi(stack, 'API', {
       name: 'apiKeyUnitTest',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.auth.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.auth.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.API_KEY,
           apiKeyConfig: {
-            expires: cdk.Expiration.after(cdk.Duration.days(10)),
+            expires,
           },
         },
       },
     });
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::ApiKey', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::ApiKey', {
       ApiId: { 'Fn::GetAtt': ['API62EA1CFF', 'ApiId'] },
       Expires: expirationDate,
     });
@@ -116,7 +118,7 @@ describe('AppSync API Key Authorization', () => {
     const when = () => {
       new appsync.GraphqlApi(stack, 'API', {
         name: 'apiKeyUnitTest',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.auth.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.auth.graphql')),
         authorizationConfig: {
           defaultAuthorization: {
             authorizationType: appsync.AuthorizationType.API_KEY,
@@ -137,7 +139,7 @@ describe('AppSync API Key Authorization', () => {
     const when = () => {
       new appsync.GraphqlApi(stack, 'API', {
         name: 'apiKeyUnitTest',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.auth.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.auth.graphql')),
         authorizationConfig: {
           defaultAuthorization: {
             authorizationType: appsync.AuthorizationType.API_KEY,
@@ -157,7 +159,7 @@ describe('AppSync API Key Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
         additionalAuthorizationModes: [
@@ -174,7 +176,7 @@ describe('AppSync API Key Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::ApiKey', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::ApiKey', {
       Description: 'Custom Description',
     });
   });
@@ -184,7 +186,7 @@ describe('AppSync API Key Authorization', () => {
     expect(() => {
       new appsync.GraphqlApi(stack, 'api', {
         name: 'api',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
         authorizationConfig: {
           additionalAuthorizationModes: [{
             authorizationType: appsync.AuthorizationType.API_KEY,
@@ -199,7 +201,7 @@ describe('AppSync API Key Authorization', () => {
     expect(() => {
       new appsync.GraphqlApi(stack, 'api', {
         name: 'api',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
         authorizationConfig: {
           defaultAuthorization: { authorizationType: appsync.AuthorizationType.API_KEY },
           additionalAuthorizationModes: [{
@@ -215,7 +217,7 @@ describe('AppSync API Key Authorization', () => {
     expect(() => {
       new appsync.GraphqlApi(stack, 'api', {
         name: 'api',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
         authorizationConfig: {
           defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
           additionalAuthorizationModes: [
@@ -233,14 +235,14 @@ describe('AppSync IAM Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
       },
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'AWS_IAM',
     });
   });
@@ -249,14 +251,14 @@ describe('AppSync IAM Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         additionalAuthorizationModes: [{ authorizationType: appsync.AuthorizationType.IAM }],
       },
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AdditionalAuthenticationProviders: [{ AuthenticationType: 'AWS_IAM' }],
     });
   });
@@ -266,7 +268,7 @@ describe('AppSync IAM Authorization', () => {
     expect(() => {
       new appsync.GraphqlApi(stack, 'api', {
         name: 'api',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
         authorizationConfig: {
           defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
           additionalAuthorizationModes: [{ authorizationType: appsync.AuthorizationType.IAM }],
@@ -280,7 +282,7 @@ describe('AppSync IAM Authorization', () => {
     expect(() => {
       new appsync.GraphqlApi(stack, 'api', {
         name: 'api',
-        schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+        schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
         authorizationConfig: {
           additionalAuthorizationModes: [
             { authorizationType: appsync.AuthorizationType.IAM },
@@ -301,7 +303,7 @@ describe('AppSync User Pool Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.USER_POOL,
@@ -311,7 +313,7 @@ describe('AppSync User Pool Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'AMAZON_COGNITO_USER_POOLS',
       UserPoolConfig: {
         AwsRegion: { Ref: 'AWS::Region' },
@@ -325,7 +327,7 @@ describe('AppSync User Pool Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.USER_POOL,
@@ -339,7 +341,7 @@ describe('AppSync User Pool Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'AMAZON_COGNITO_USER_POOLS',
       UserPoolConfig: {
         AwsRegion: { Ref: 'AWS::Region' },
@@ -354,7 +356,7 @@ describe('AppSync User Pool Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         additionalAuthorizationModes: [{
           authorizationType: appsync.AuthorizationType.USER_POOL,
@@ -364,7 +366,7 @@ describe('AppSync User Pool Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AdditionalAuthenticationProviders: [{
         AuthenticationType: 'AMAZON_COGNITO_USER_POOLS',
         UserPoolConfig: {
@@ -379,7 +381,7 @@ describe('AppSync User Pool Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         additionalAuthorizationModes: [{
           authorizationType: appsync.AuthorizationType.USER_POOL,
@@ -393,7 +395,7 @@ describe('AppSync User Pool Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AdditionalAuthenticationProviders: [{
         AuthenticationType: 'AMAZON_COGNITO_USER_POOLS',
         UserPoolConfig: {
@@ -409,7 +411,7 @@ describe('AppSync User Pool Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.USER_POOL,
@@ -433,7 +435,7 @@ describe('AppSync User Pool Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'AMAZON_COGNITO_USER_POOLS',
       UserPoolConfig: {
         AwsRegion: { Ref: 'AWS::Region' },
@@ -466,7 +468,7 @@ describe('AppSync OIDC Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.OIDC,
@@ -476,7 +478,7 @@ describe('AppSync OIDC Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'OPENID_CONNECT',
       OpenIDConnectConfig: {
         Issuer: 'test',
@@ -488,7 +490,7 @@ describe('AppSync OIDC Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.OIDC,
@@ -503,7 +505,7 @@ describe('AppSync OIDC Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'OPENID_CONNECT',
       OpenIDConnectConfig: {
         AuthTTL: 1,
@@ -518,7 +520,7 @@ describe('AppSync OIDC Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         additionalAuthorizationModes: [{
           authorizationType: appsync.AuthorizationType.OIDC,
@@ -528,7 +530,7 @@ describe('AppSync OIDC Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AdditionalAuthenticationProviders: [{
         AuthenticationType: 'OPENID_CONNECT',
         OpenIDConnectConfig: {
@@ -542,7 +544,7 @@ describe('AppSync OIDC Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         additionalAuthorizationModes: [{
           authorizationType: appsync.AuthorizationType.OIDC,
@@ -557,7 +559,7 @@ describe('AppSync OIDC Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AdditionalAuthenticationProviders: [{
         AuthenticationType: 'OPENID_CONNECT',
         OpenIDConnectConfig: {
@@ -574,7 +576,7 @@ describe('AppSync OIDC Authorization', () => {
     // WHEN
     new appsync.GraphqlApi(stack, 'api', {
       name: 'api',
-      schema: appsync.Schema.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.OIDC,
@@ -604,7 +606,7 @@ describe('AppSync OIDC Authorization', () => {
     });
 
     // THEN
-    expect(stack).toHaveResourceLike('AWS::AppSync::GraphQLApi', {
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
       AuthenticationType: 'OPENID_CONNECT',
       OpenIDConnectConfig: { Issuer: 'test' },
       AdditionalAuthenticationProviders: [
@@ -628,5 +630,247 @@ describe('AppSync OIDC Authorization', () => {
         },
       ],
     });
+  });
+});
+
+describe('AppSync Lambda Authorization', () => {
+  let fn: lambda.Function;
+  beforeEach(() => {
+    fn = new lambda.Function(stack, 'auth-function', {
+      runtime: lambda.Runtime.NODEJS_14_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline('/* lambda authentication code here.*/'),
+    });
+  });
+
+  test('Lambda authorization configurable in default authorization has default configuration', () => {
+    // WHEN
+    new appsync.GraphqlApi(stack, 'api', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        defaultAuthorization: {
+          authorizationType: appsync.AuthorizationType.LAMBDA,
+          lambdaAuthorizerConfig: {
+            handler: fn,
+          },
+        },
+      },
+    });
+
+    // THEN
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
+      AuthenticationType: 'AWS_LAMBDA',
+      LambdaAuthorizerConfig: {
+        AuthorizerUri: {
+          'Fn::GetAtt': [
+            'authfunction96361832',
+            'Arn',
+          ],
+        },
+      },
+    });
+
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunction',
+      FunctionName: {
+        'Fn::GetAtt': [
+          'authfunction96361832',
+          'Arn',
+        ],
+      },
+    });
+
+
+  });
+
+  test('Lambda authorization configurable in default authorization', () => {
+    // WHEN
+    new appsync.GraphqlApi(stack, 'api', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        defaultAuthorization: {
+          authorizationType: appsync.AuthorizationType.LAMBDA,
+          lambdaAuthorizerConfig: {
+            handler: fn,
+            resultsCacheTtl: cdk.Duration.seconds(300),
+            validationRegex: 'custom-.*',
+          },
+        },
+      },
+    });
+
+    // THEN
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
+      AuthenticationType: 'AWS_LAMBDA',
+      LambdaAuthorizerConfig: {
+        AuthorizerUri: {
+          'Fn::GetAtt': [
+            'authfunction96361832',
+            'Arn',
+          ],
+        },
+        AuthorizerResultTtlInSeconds: 300,
+        IdentityValidationExpression: 'custom-.*',
+      },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunction',
+      FunctionName: {
+        'Fn::GetAtt': [
+          'authfunction96361832',
+          'Arn',
+        ],
+      },
+    });
+  });
+
+  test('Lambda authorization configurable in additional authorization has default configuration', () => {
+    // WHEN
+    new appsync.GraphqlApi(stack, 'api', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        additionalAuthorizationModes: [{
+          authorizationType: appsync.AuthorizationType.LAMBDA,
+          lambdaAuthorizerConfig: {
+            handler: fn,
+          },
+        }],
+      },
+    });
+
+    // THEN
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
+      AdditionalAuthenticationProviders: [{
+        AuthenticationType: 'AWS_LAMBDA',
+        LambdaAuthorizerConfig: {
+          AuthorizerUri: {
+            'Fn::GetAtt': [
+              'authfunction96361832',
+              'Arn',
+            ],
+          },
+        },
+      }],
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunction',
+      FunctionName: {
+        'Fn::GetAtt': [
+          'authfunction96361832',
+          'Arn',
+        ],
+      },
+    });
+  });
+
+  test('Lambda authorization configurable in additional authorization', () => {
+    // WHEN
+    new appsync.GraphqlApi(stack, 'api', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        additionalAuthorizationModes: [{
+          authorizationType: appsync.AuthorizationType.LAMBDA,
+          lambdaAuthorizerConfig: {
+            handler: fn,
+            resultsCacheTtl: cdk.Duration.seconds(300),
+            validationRegex: 'custom-.*',
+          },
+        }],
+      },
+    });
+
+    // THEN
+    Template.fromStack(stack).hasResourceProperties('AWS::AppSync::GraphQLApi', {
+      AdditionalAuthenticationProviders: [{
+        AuthenticationType: 'AWS_LAMBDA',
+        LambdaAuthorizerConfig: {
+          AuthorizerUri: {
+            'Fn::GetAtt': [
+              'authfunction96361832',
+              'Arn',
+            ],
+          },
+          AuthorizerResultTtlInSeconds: 300,
+          IdentityValidationExpression: 'custom-.*',
+        },
+      }],
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunction',
+      FunctionName: {
+        'Fn::GetAtt': [
+          'authfunction96361832',
+          'Arn',
+        ],
+      },
+    });
+  });
+
+  test('Lambda authorization throws with multiple lambda authorization', () => {
+    expect(() => new appsync.GraphqlApi(stack, 'api', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        defaultAuthorization: {
+          authorizationType: appsync.AuthorizationType.LAMBDA,
+          lambdaAuthorizerConfig: {
+            handler: fn,
+          },
+        },
+        additionalAuthorizationModes: [
+          {
+            authorizationType: appsync.AuthorizationType.LAMBDA,
+            lambdaAuthorizerConfig: {
+              handler: fn,
+              resultsCacheTtl: cdk.Duration.seconds(300),
+              validationRegex: 'custom-.*',
+            },
+          },
+        ],
+      },
+    })).toThrow('You can only have a single AWS Lambda function configured to authorize your API.');
+
+    expect(() => new appsync.GraphqlApi(stack, 'api2', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        defaultAuthorization: { authorizationType: appsync.AuthorizationType.IAM },
+        additionalAuthorizationModes: [
+          {
+            authorizationType: appsync.AuthorizationType.LAMBDA,
+            lambdaAuthorizerConfig: {
+              handler: fn,
+              resultsCacheTtl: cdk.Duration.seconds(300),
+              validationRegex: 'custom-.*',
+            },
+          },
+          {
+            authorizationType: appsync.AuthorizationType.LAMBDA,
+            lambdaAuthorizerConfig: {
+              handler: fn,
+              resultsCacheTtl: cdk.Duration.seconds(300),
+              validationRegex: 'custom-.*',
+            },
+          },
+        ],
+      },
+    })).toThrow('You can only have a single AWS Lambda function configured to authorize your API.');
+  });
+
+  test('throws if authorization type and mode do not match', () => {
+    expect(() => new appsync.GraphqlApi(stack, 'api', {
+      name: 'api',
+      schema: appsync.SchemaFile.fromAsset(path.join(__dirname, 'appsync.test.graphql')),
+      authorizationConfig: {
+        defaultAuthorization: {
+          authorizationType: appsync.AuthorizationType.LAMBDA,
+          openIdConnectConfig: { oidcProvider: 'test' },
+        },
+      },
+    })).toThrow('Missing Lambda Configuration');
   });
 });

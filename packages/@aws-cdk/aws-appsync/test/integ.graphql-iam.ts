@@ -12,7 +12,7 @@ import {
   UserPoolDefaultAction,
   Values,
   IamResource,
-  Schema,
+  SchemaFile,
 } from '../lib';
 
 /*
@@ -38,7 +38,7 @@ const userPool = new UserPool(stack, 'Pool', {
 
 const api = new GraphqlApi(stack, 'Api', {
   name: 'Integ_Test_IAM',
-  schema: Schema.fromAsset(join(__dirname, 'integ.graphql-iam.graphql')),
+  schema: SchemaFile.fromAsset(join(__dirname, 'integ.graphql-iam.graphql')),
   authorizationConfig: {
     defaultAuthorization: {
       authorizationType: AuthorizationType.USER_POOL,
@@ -95,16 +95,16 @@ api.grant(lambdaIAM, IamResource.ofType('test'), 'appsync:GraphQL');
 api.grantMutation(lambdaIAM, 'addTest');
 
 new Function(stack, 'testQuery', {
-  code: Code.fromAsset('verify'),
+  code: Code.fromAsset(join(__dirname, 'verify/iam-query')),
   handler: 'iam-query.handler',
-  runtime: Runtime.NODEJS_12_X,
+  runtime: Runtime.NODEJS_14_X,
   environment: { APPSYNC_ENDPOINT: api.graphqlUrl },
   role: lambdaIAM,
 });
 new Function(stack, 'testFail', {
-  code: Code.fromAsset('verify'),
+  code: Code.fromAsset(join(__dirname, 'verify/iam-query')),
   handler: 'iam-query.handler',
-  runtime: Runtime.NODEJS_12_X,
+  runtime: Runtime.NODEJS_14_X,
   environment: { APPSYNC_ENDPOINT: api.graphqlUrl },
 });
 

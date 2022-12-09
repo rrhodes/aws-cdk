@@ -1,3 +1,4 @@
+import { partitionInformation } from './aws-entities';
 import { Fact, FactName } from './fact';
 
 /**
@@ -32,6 +33,26 @@ export class RegionInfo {
   }
 
   /**
+   * Retrieves a collection of all fact values for all regions, limited to some partitions
+   *
+   * @param factName the name of the fact to retrieve values for.
+   *   For a list of common fact names, see the FactName class
+   * @param partitions list of partitions to retrieve facts for. Defaults
+   *   to `['aws', 'aws-cn']`.
+   * @returns a mapping with AWS region codes as the keys,
+   *   and the fact in the given region as the value for that key
+   */
+  public static limitedRegionMap(factName: string, partitions: string[]): { [region: string]: string } {
+    const ret: Record<string, string> = {};
+    for (const [region, value] of Object.entries(RegionInfo.regionMap(factName))) {
+      if (partitions.includes(partitionInformation(region).partition)) {
+        ret[region] = value;
+      }
+    }
+    return ret;
+  }
+
+  /**
    * Obtain region info for a given region name.
    *
    * @param name the name of the region (e.g: us-east-1)
@@ -47,6 +68,13 @@ export class RegionInfo {
    */
   public get cdkMetadataResourceAvailable(): boolean {
     return Fact.find(this.name, FactName.CDK_METADATA_RESOURCE_AVAILABLE) === 'YES';
+  }
+
+  /**
+   * Whether the given region is an opt-in region
+   */
+  public get isOptInRegion(): boolean {
+    return Fact.find(this.name, FactName.IS_OPT_IN_REGION) === 'YES';
   }
 
   /**
@@ -78,6 +106,13 @@ export class RegionInfo {
   }
 
   /**
+  * The hosted zone ID used by Route 53 to alias a EBS environment endpoint in this region (e.g: Z2O1EMRO9K5GLX)
+  */
+  public get ebsEnvEndpointHostedZoneId(): string | undefined {
+    return Fact.find(this.name, FactName.EBS_ENV_ENDPOINT_HOSTED_ZONE_ID);
+  }
+
+  /**
    * The prefix for VPC Endpoint Service names,
    * cn.com.amazonaws.vpce for China regions,
    * com.amazonaws.vpce otherwise.
@@ -96,7 +131,6 @@ export class RegionInfo {
 
   /**
    * The account ID for ELBv2 in this region
-   *
    */
   public get elbv2Account(): string | undefined {
     return Fact.find(this.name, FactName.ELBV2_ACCOUNT);
@@ -111,10 +145,26 @@ export class RegionInfo {
   }
 
   /**
+   * The ARN of the CloudWatch Lambda Insights extension, for the given version.
+   * @param insightsVersion the version (e.g. 1.0.98.0)
+   * @param architecture the Lambda Function architecture (e.g. 'x86_64' or 'arm64')
+   */
+  public cloudwatchLambdaInsightsArn(insightsVersion: string, architecture?: string): string | undefined {
+    return Fact.find(this.name, FactName.cloudwatchLambdaInsightsVersion(insightsVersion, architecture));
+  }
+
+  /**
    * The ID of the AWS account that owns the public ECR repository that contains the
    * AWS App Mesh Envoy Proxy images in a given region.
    */
   public get appMeshRepositoryAccount(): string | undefined {
     return Fact.find(this.name, FactName.APPMESH_ECR_ACCOUNT);
+  }
+
+  /**
+   * The CIDR block used by Kinesis Data Firehose servers.
+   */
+  public get firehoseCidrBlock(): string | undefined {
+    return Fact.find(this.name, FactName.FIREHOSE_CIDR_BLOCK);
   }
 }

@@ -6,7 +6,7 @@ import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
 import { ApplicationELBMetrics } from '../elasticloadbalancingv2-canned-metrics.generated';
 import { BaseLoadBalancer, BaseLoadBalancerLookupOptions, BaseLoadBalancerProps, ILoadBalancerV2 } from '../shared/base-load-balancer';
-import { IpAddressType, ApplicationProtocol } from '../shared/enums';
+import { IpAddressType, ApplicationProtocol, DesyncMitigationMode } from '../shared/enums';
 import { ApplicationListener, BaseApplicationListenerProps } from './application-listener';
 import { ListenerAction } from './application-listener-action';
 
@@ -43,6 +43,22 @@ export interface ApplicationLoadBalancerProps extends BaseLoadBalancerProps {
    * @default 60
    */
   readonly idleTimeout?: Duration;
+
+  /**
+   * Indicates whether HTTP headers with invalid header fields are removed
+   * by the load balancer (true) or routed to targets (false)
+   *
+   * @default false
+   */
+  readonly dropInvalidHeaderFields?: boolean;
+
+  /**
+   * Determines how the load balancer handles requests that
+   * might pose a security risk to your application
+   *
+   * @default DesyncMitigationMode.DEFENSIVE
+   */
+  readonly desyncMitigationMode?: DesyncMitigationMode;
 }
 
 /**
@@ -80,6 +96,7 @@ export class ApplicationLoadBalancer extends BaseLoadBalancer implements IApplic
 
   public readonly connections: ec2.Connections;
   public readonly ipAddressType?: IpAddressType;
+  public readonly listeners: ApplicationListener[];
 
   constructor(scope: Construct, id: string, props: ApplicationLoadBalancerProps) {
     super(scope, id, props, {
@@ -95,19 +112,24 @@ export class ApplicationLoadBalancer extends BaseLoadBalancer implements IApplic
       allowAllOutbound: false,
     })];
     this.connections = new ec2.Connections({ securityGroups });
+    this.listeners = [];
 
     if (props.http2Enabled === false) { this.setAttribute('routing.http2.enabled', 'false'); }
     if (props.idleTimeout !== undefined) { this.setAttribute('idle_timeout.timeout_seconds', props.idleTimeout.toSeconds().toString()); }
+    if (props.dropInvalidHeaderFields) {this.setAttribute('routing.http.drop_invalid_header_fields.enabled', 'true'); }
+    if (props.desyncMitigationMode !== undefined) {this.setAttribute('routing.http.desync_mitigation_mode', props.desyncMitigationMode); }
   }
 
   /**
    * Add a new listener to this load balancer
    */
   public addListener(id: string, props: BaseApplicationListenerProps): ApplicationListener {
-    return new ApplicationListener(this, id, {
+    const listener = new ApplicationListener(this, id, {
       loadBalancer: this,
       ...props,
     });
+    this.listeners.push(listener);
+    return listener;
   }
 
   /**
@@ -144,7 +166,7 @@ export class ApplicationLoadBalancer extends BaseLoadBalancer implements IApplic
     return new cloudwatch.Metric({
       namespace: 'AWS/ApplicationELB',
       metricName,
-      dimensions: { LoadBalancer: this.loadBalancerFullName },
+      dimensionsMap: { LoadBalancer: this.loadBalancerFullName },
       ...props,
     });
   }
@@ -488,6 +510,12 @@ export interface IApplicationLoadBalancer extends ILoadBalancerV2, ec2.IConnecta
   readonly ipAddressType?: IpAddressType;
 
   /**
+   * A list of listeners that have been added to the load balancer.
+   * This list is only valid for owned constructs.
+   */
+  readonly listeners: ApplicationListener[];
+
+  /**
    * Add a new listener to this load balancer
    */
   addListener(id: string, props: BaseApplicationListenerProps): ApplicationListener;
@@ -554,6 +582,10 @@ class ImportedApplicationLoadBalancer extends Resource implements IApplicationLo
    */
   public readonly loadBalancerArn: string;
 
+  public get listeners(): ApplicationListener[] {
+    throw Error('.listeners can only be accessed if the class was constructed as an owned, not imported, load balancer');
+  }
+
   /**
    * VPC of the load balancer
    *
@@ -603,6 +635,10 @@ class LookedUpApplicationLoadBalancer extends Resource implements IApplicationLo
   public readonly connections: ec2.Connections;
   public readonly vpc?: ec2.IVpc;
 
+  public get listeners(): ApplicationListener[] {
+    throw Error('.listeners can only be accessed if the class was constructed as an owned, not looked up, load balancer');
+  }
+
   constructor(scope: Construct, id: string, props: cxapi.LoadBalancerContextResponse) {
     super(scope, id, {
       environmentFromArn: props.loadBalancerArn,
@@ -624,7 +660,7 @@ class LookedUpApplicationLoadBalancer extends Resource implements IApplicationLo
 
     this.connections = new ec2.Connections();
     for (const securityGroupId of props.securityGroupIds) {
-      const securityGroup = ec2.SecurityGroup.fromLookup(this, `SecurityGroup-${securityGroupId}`, securityGroupId);
+      const securityGroup = ec2.SecurityGroup.fromLookupById(this, `SecurityGroup-${securityGroupId}`, securityGroupId);
       this.connections.addSecurityGroup(securityGroup);
     }
   }

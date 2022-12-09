@@ -1,7 +1,8 @@
 import { EOL } from 'os';
 import * as events from '@aws-cdk/aws-events';
 import * as iam from '@aws-cdk/aws-iam';
-import { IResource, Lazy, RemovalPolicy, Resource, Stack, Token } from '@aws-cdk/core';
+import * as kms from '@aws-cdk/aws-kms';
+import { ArnFormat, IResource, Lazy, RemovalPolicy, Resource, Stack, Tags, Token, TokenComparison } from '@aws-cdk/core';
 import { IConstruct, Construct } from 'constructs';
 import { CfnRepository } from './ecr.generated';
 import { LifecycleRule, TagStatus } from './lifecycle';
@@ -41,13 +42,23 @@ export interface IRepository extends IResource {
   repositoryUriForTag(tag?: string): string;
 
   /**
-   * Returns the URI of the repository for a certain tag. Can be used in `docker push/pull`.
+   * Returns the URI of the repository for a certain digest. Can be used in `docker push/pull`.
    *
    *    ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPOSITORY[@DIGEST]
    *
    * @param digest Image digest to use (tools usually default to the image with the "latest" tag if omitted)
    */
   repositoryUriForDigest(digest?: string): string;
+
+  /**
+   * Returns the URI of the repository for a certain tag or digest, inferring based on the syntax of the tag. Can be used in `docker push/pull`.
+   *
+   *    ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPOSITORY[:TAG]
+   *    ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPOSITORY[@DIGEST]
+   *
+   * @param tagOrDigest Image tag or digest to use (tools usually default to the image with the "latest" tag if omitted)
+   */
+  repositoryUriForTagOrDigest(tagOrDigest?: string): string;
 
   /**
    * Add a policy statement to the repository's resource policy
@@ -162,12 +173,28 @@ export abstract class RepositoryBase extends Resource implements IRepository {
   }
 
   /**
+   * Returns the URL of the repository. Can be used in `docker push/pull`.
+   *
+   *    ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPOSITORY[:TAG]
+   *    ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPOSITORY[@DIGEST]
+   *
+   * @param tagOrDigest Optional image tag or digest (digests must start with `sha256:`)
+   */
+  public repositoryUriForTagOrDigest(tagOrDigest?: string): string {
+    if (tagOrDigest?.startsWith('sha256:')) {
+      return this.repositoryUriForDigest(tagOrDigest);
+    } else {
+      return this.repositoryUriForTag(tagOrDigest);
+    }
+  }
+
+  /**
    * Returns the repository URI, with an appended suffix, if provided.
    * @param suffix An image tag or an image digest.
    * @private
    */
   private repositoryUriWithSuffix(suffix?: string): string {
-    const parts = this.stack.parseArn(this.repositoryArn);
+    const parts = this.stack.splitArn(this.repositoryArn, ArnFormat.SLASH_RESOURCE_NAME);
     return `${parts.account}.dkr.ecr.${parts.region}.${this.stack.urlSuffix}/${this.repositoryName}${suffix}`;
   }
 
@@ -252,17 +279,49 @@ export abstract class RepositoryBase extends Resource implements IRepository {
     rule.addTarget(options.target);
     return rule;
   }
+
   /**
    * Grant the given principal identity permissions to perform the actions on this repository
    */
   public grant(grantee: iam.IGrantable, ...actions: string[]) {
-    return iam.Grant.addToPrincipalOrResource({
-      grantee,
-      actions,
-      resourceArns: [this.repositoryArn],
-      resourceSelfArns: [],
-      resource: this,
-    });
+    const crossAccountPrincipal = this.unsafeCrossAccountResourcePolicyPrincipal(grantee);
+    if (crossAccountPrincipal) {
+      // If the principal is from a different account,
+      // that means addToPrincipalOrResource() will update the Resource Policy of this repo to trust that principal.
+      // However, ECR verifies that the principal used in the Policy exists,
+      // and will error out if it doesn't.
+      // Because of that, if the principal is a newly created resource,
+      // and there is not a dependency relationship between the Stacks of this repo and the principal,
+      // trust the entire account of the principal instead
+      // (otherwise, deploying this repo will fail).
+      // To scope down the permissions as much as possible,
+      // only trust principals from that account with a specific tag
+      const crossAccountPrincipalStack = Stack.of(crossAccountPrincipal);
+      const roleTag = `${crossAccountPrincipalStack.stackName}_${crossAccountPrincipal.node.addr}`;
+      Tags.of(crossAccountPrincipal).add('aws-cdk:id', roleTag);
+      this.addToResourcePolicy(new iam.PolicyStatement({
+        actions,
+        principals: [new iam.AccountPrincipal(crossAccountPrincipalStack.account)],
+        conditions: {
+          StringEquals: { 'aws:PrincipalTag/aws-cdk:id': roleTag },
+        },
+      }));
+
+      return iam.Grant.addToPrincipal({
+        grantee,
+        actions,
+        resourceArns: [this.repositoryArn],
+        scope: this,
+      });
+    } else {
+      return iam.Grant.addToPrincipalOrResource({
+        grantee,
+        actions,
+        resourceArns: [this.repositoryArn],
+        resourceSelfArns: [],
+        resource: this,
+      });
+    }
   }
 
   /**
@@ -291,6 +350,43 @@ export abstract class RepositoryBase extends Resource implements IRepository {
       'ecr:InitiateLayerUpload',
       'ecr:UploadLayerPart',
       'ecr:CompleteLayerUpload');
+  }
+
+  /**
+   * Returns the resource that backs the given IAM grantee if we cannot put a direct reference
+   * to the grantee in the resource policy of this ECR repository,
+   * and 'undefined' in case we can.
+   */
+  private unsafeCrossAccountResourcePolicyPrincipal(grantee: iam.IGrantable): IConstruct | undefined {
+    // A principal cannot be safely added to the Resource Policy of this ECR repository, if:
+    // 1. The principal is from a different account, and
+    // 2. The principal is a new resource (meaning, not just referenced), and
+    // 3. The Stack this repo belongs to doesn't depend on the Stack the principal belongs to.
+
+    // condition #1
+    const principal = grantee.grantPrincipal;
+    const principalAccount = principal.principalAccount;
+    if (!principalAccount) {
+      return undefined;
+    }
+    const repoAndPrincipalAccountCompare = Token.compareStrings(this.env.account, principalAccount);
+    if (repoAndPrincipalAccountCompare === TokenComparison.BOTH_UNRESOLVED ||
+        repoAndPrincipalAccountCompare === TokenComparison.SAME) {
+      return undefined;
+    }
+
+    // condition #2
+    if (!iam.principalIsOwnedResource(principal)) {
+      return undefined;
+    }
+
+    // condition #3
+    const principalStack = Stack.of(principal);
+    if (this.stack.dependencies.includes(principalStack)) {
+      return undefined;
+    }
+
+    return principal;
   }
 }
 
@@ -326,6 +422,27 @@ export interface RepositoryProps {
    * @default Automatically generated name.
    */
   readonly repositoryName?: string;
+
+  /**
+   * The kind of server-side encryption to apply to this repository.
+   *
+   * If you choose KMS, you can specify a KMS key via `encryptionKey`. If
+   * encryptionKey is not specified, an AWS managed KMS key is used.
+   *
+   * @default - `KMS` if `encryptionKey` is specified, or `AES256` otherwise.
+   */
+  readonly encryption?: RepositoryEncryption;
+
+  /**
+   * External KMS key to use for repository encryption.
+   *
+   * The 'encryption' property must be either not specified or set to "KMS".
+   * An error will be emitted if encryption is set to "AES256".
+   *
+   * @default - If encryption is set to `KMS` and this property is undefined,
+   * an AWS managed KMS key is used.
+   */
+  readonly encryptionKey?: kms.IKey;
 
   /**
    * Life cycle rules to apply to this registry
@@ -411,7 +528,9 @@ export class Repository extends RepositoryBase {
       }
     }
 
-    return new Import(scope, id);
+    return new Import(scope, id, {
+      environmentFromArn: repositoryArn,
+    });
   }
 
   public static fromRepositoryName(scope: Construct, id: string, repositoryName: string): IRepository {
@@ -440,7 +559,6 @@ export class Repository extends RepositoryBase {
       resourceName: repositoryName,
     });
   }
-
 
   private static validateRepositoryName(physicalName: string) {
     const repositoryName = physicalName;
@@ -484,10 +602,9 @@ export class Repository extends RepositoryBase {
       // It says "Text", but they actually mean "Object".
       repositoryPolicyText: Lazy.any({ produce: () => this.policyDocument }),
       lifecyclePolicy: Lazy.any({ produce: () => this.renderLifecyclePolicy() }),
-      imageScanningConfiguration: !props.imageScanOnPush ? undefined : {
-        scanOnPush: true,
-      },
+      imageScanningConfiguration: props.imageScanOnPush !== undefined ? { scanOnPush: props.imageScanOnPush } : undefined,
       imageTagMutability: props.imageTagMutability || undefined,
+      encryptionConfiguration: this.parseEncryption(props),
     });
 
     resource.applyRemovalPolicy(props.removalPolicy);
@@ -503,6 +620,8 @@ export class Repository extends RepositoryBase {
       resource: 'repository',
       resourceName: this.physicalName,
     });
+
+    this.node.addValidation({ validate: () => this.policyDocument?.validateForResourcePolicy() ?? [] });
   }
 
   public addToResourcePolicy(statement: iam.PolicyStatement): iam.AddToResourcePolicyResult {
@@ -510,13 +629,7 @@ export class Repository extends RepositoryBase {
       this.policyDocument = new iam.PolicyDocument();
     }
     this.policyDocument.addStatements(statement);
-    return { statementAdded: false, policyDependable: this.policyDocument };
-  }
-
-  protected validate(): string[] {
-    const errors = super.validate();
-    errors.push(...this.policyDocument?.validateForResourcePolicy() || []);
-    return errors;
+    return { statementAdded: true, policyDependable: this.policyDocument };
   }
 
   /**
@@ -600,6 +713,34 @@ export class Repository extends RepositoryBase {
     validateAnyRuleLast(ret);
     return ret;
   }
+
+  /**
+   * Set up key properties and return the Repository encryption property from the
+   * user's configuration.
+   */
+  private parseEncryption(props: RepositoryProps): CfnRepository.EncryptionConfigurationProperty | undefined {
+
+    // default based on whether encryptionKey is specified
+    const encryptionType = props.encryption ?? (props.encryptionKey ? RepositoryEncryption.KMS : RepositoryEncryption.AES_256);
+
+    // if encryption key is set, encryption must be set to KMS.
+    if (encryptionType !== RepositoryEncryption.KMS && props.encryptionKey) {
+      throw new Error(`encryptionKey is specified, so 'encryption' must be set to KMS (value: ${encryptionType.value})`);
+    }
+
+    if (encryptionType === RepositoryEncryption.AES_256) {
+      return undefined;
+    }
+
+    if (encryptionType === RepositoryEncryption.KMS) {
+      return {
+        encryptionType: 'KMS',
+        kmsKey: props.encryptionKey?.keyArn,
+      };
+    }
+
+    throw new Error(`Unexpected 'encryptionType': ${encryptionType}`);
+  }
 }
 
 function validateAnyRuleLast(rules: LifecycleRule[]) {
@@ -661,4 +802,25 @@ export enum TagMutability {
    */
   IMMUTABLE = 'IMMUTABLE',
 
+}
+
+/**
+ * Indicates whether server-side encryption is enabled for the object, and whether that encryption is
+ * from the AWS Key Management Service (AWS KMS) or from Amazon S3 managed encryption (SSE-S3).
+ * @see https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMetadata.html#SysMetadata
+ */
+export class RepositoryEncryption {
+  /**
+   * 'AES256'
+   */
+  public static readonly AES_256 = new RepositoryEncryption('AES256');
+  /**
+   * 'KMS'
+   */
+  public static readonly KMS = new RepositoryEncryption('KMS');
+
+  /**
+   * @param value the string value of the encryption
+   */
+  protected constructor(public readonly value: string) { }
 }

@@ -1,6 +1,7 @@
 {
   "name": "@aws-cdk/aws-codepipeline-actions",
   "version": "0.0.0",
+  "private": true,
   "description": "Concrete Actions for AWS Code Pipeline",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -17,18 +18,25 @@
       "dotnet": {
         "namespace": "Amazon.CDK.AWS.CodePipeline.Actions",
         "packageId": "Amazon.CDK.AWS.CodePipeline.Actions",
-        "iconUrl": "https://raw.githubusercontent.com/aws/aws-cdk/master/logo/default-256-dark.png"
+        "iconUrl": "https://raw.githubusercontent.com/aws/aws-cdk/main/logo/default-256-dark.png"
       },
       "python": {
         "distName": "aws-cdk.aws-codepipeline-actions",
         "module": "aws_cdk.aws_codepipeline_actions",
         "classifiers": [
           "Framework :: AWS CDK",
-          "Framework :: AWS CDK :: 1"
+          "Framework :: AWS CDK :: 2"
         ]
       }
     },
-    "projectReferences": true
+    "projectReferences": true,
+    "metadata": {
+      "jsii": {
+        "rosetta": {
+          "strict": true
+        }
+      }
+    }
   },
   "repository": {
     "type": "git",
@@ -40,7 +48,7 @@
     "watch": "cdk-watch",
     "lint": "cdk-lint",
     "test": "cdk-test",
-    "integ": "cdk-integ",
+    "integ": "integ-runner",
     "pkglint": "pkglint -f",
     "package": "cdk-package",
     "awslint": "cdk-awslint",
@@ -68,17 +76,20 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
-    "@types/jest": "^26.0.23",
+    "@aws-cdk/assertions": "0.0.0",
     "@aws-cdk/aws-cloudtrail": "0.0.0",
     "@aws-cdk/aws-codestarnotifications": "0.0.0",
+    "@aws-cdk/aws-s3-assets": "0.0.0",
+    "@aws-cdk/aws-s3-deployment": "0.0.0",
+    "@aws-cdk/cdk-build-tools": "0.0.0",
+    "@aws-cdk/integ-runner": "0.0.0",
+    "@aws-cdk/integ-tests": "0.0.0",
     "@aws-cdk/cx-api": "0.0.0",
-    "@types/lodash": "^4.14.170",
-    "cdk-build-tools": "0.0.0",
-    "cdk-integ-tools": "0.0.0",
-    "lodash": "^4.17.21",
-    "nodeunit-shim": "0.0.0",
-    "pkglint": "0.0.0",
-    "@aws-cdk/assert-internal": "0.0.0"
+    "@aws-cdk/pkglint": "0.0.0",
+    "@types/jest": "^27.5.2",
+    "@types/lodash": "^4.14.189",
+    "jest": "^27.5.1",
+    "lodash": "^4.17.21"
   },
   "dependencies": {
     "@aws-cdk/aws-cloudformation": "0.0.0",
@@ -89,6 +100,7 @@
     "@aws-cdk/aws-ec2": "0.0.0",
     "@aws-cdk/aws-ecr": "0.0.0",
     "@aws-cdk/aws-ecs": "0.0.0",
+    "@aws-cdk/aws-elasticbeanstalk": "0.0.0",
     "@aws-cdk/aws-events": "0.0.0",
     "@aws-cdk/aws-events-targets": "0.0.0",
     "@aws-cdk/aws-iam": "0.0.0",
@@ -100,7 +112,7 @@
     "@aws-cdk/aws-stepfunctions": "0.0.0",
     "@aws-cdk/core": "0.0.0",
     "case": "1.6.3",
-    "constructs": "^3.3.69"
+    "constructs": "^10.0.0"
   },
   "homepage": "https://github.com/aws/aws-cdk",
   "peerDependencies": {
@@ -112,6 +124,7 @@
     "@aws-cdk/aws-ec2": "0.0.0",
     "@aws-cdk/aws-ecr": "0.0.0",
     "@aws-cdk/aws-ecs": "0.0.0",
+    "@aws-cdk/aws-elasticbeanstalk": "0.0.0",
     "@aws-cdk/aws-events": "0.0.0",
     "@aws-cdk/aws-events-targets": "0.0.0",
     "@aws-cdk/aws-iam": "0.0.0",
@@ -122,13 +135,13 @@
     "@aws-cdk/aws-sns-subscriptions": "0.0.0",
     "@aws-cdk/aws-stepfunctions": "0.0.0",
     "@aws-cdk/core": "0.0.0",
-    "constructs": "^3.3.69"
+    "constructs": "^10.0.0"
   },
   "bundledDependencies": [
     "case"
   ],
   "engines": {
-    "node": ">= 10.13.0 <13 || >=13.7.0"
+    "node": ">= 14.15.0"
   },
   "stability": "stable",
   "awslint": {
@@ -180,7 +193,6 @@
   },
   "maturity": "stable",
   "cdk-build": {
-    "jest": true,
     "env": {
       "AWSLINT_BASE_CONSTRUCT": true
     }

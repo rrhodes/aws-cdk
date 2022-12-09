@@ -1,5 +1,5 @@
 import { IBucket } from '@aws-cdk/aws-s3';
-import { CfnElement, Fn, Resource, Stack } from '@aws-cdk/core';
+import { Fn, Resource, Stack, CfnResource } from '@aws-cdk/core';
 import { OperatingSystemType } from './machine-image';
 
 /**
@@ -12,6 +12,24 @@ export interface LinuxUserDataOptions {
    * @default "#!/bin/bash"
    */
   readonly shebang?: string;
+}
+
+/**
+ * Options when constructing UserData for Windows
+ */
+export interface WindowsUserDataOptions {
+  /**
+   * Set to true to set this userdata to persist through an instance reboot; allowing
+   * it to run on every instance start.
+   * By default, UserData is run only once during the first instance launch.
+   *
+   * For more information, see:
+   * https://aws.amazon.com/premiumsupport/knowledge-center/execute-user-data-ec2/
+   * https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/ec2-windows-user-data.html#user-data-scripts
+   *
+   * @default false
+   */
+  readonly persist?: boolean;
 }
 
 /**
@@ -36,6 +54,12 @@ export interface S3DownloadOptions {
    *          Windows - %TEMP%/bucketKey
    */
   readonly localFile?: string;
+
+  /**
+   * The region of the S3 Bucket (needed for access via VPC Gateway)
+   * @default none
+   */
+  readonly region?: string
 
 }
 
@@ -72,8 +96,8 @@ export abstract class UserData {
   /**
    * Create a userdata object for Windows hosts
    */
-  public static forWindows(): UserData {
-    return new WindowsUserData();
+  public static forWindows(options: WindowsUserDataOptions = {}): UserData {
+    return new WindowsUserData(options);
   }
 
   /**
@@ -156,7 +180,7 @@ class LinuxUserData extends UserData {
     const localPath = ( params.localFile && params.localFile.length !== 0 ) ? params.localFile : `/tmp/${ params.bucketKey }`;
     this.addCommands(
       `mkdir -p $(dirname '${localPath}')`,
-      `aws s3 cp '${s3Path}' '${localPath}'`,
+      `aws s3 cp '${s3Path}' '${localPath}'` + (params.region !== undefined ? ` --region ${params.region}` : ''),
     );
 
     return localPath;
@@ -172,7 +196,7 @@ class LinuxUserData extends UserData {
 
   public addSignalOnExitCommand( resource: Resource ): void {
     const stack = Stack.of(resource);
-    const resourceID = stack.getLogicalId(resource.node.defaultChild as CfnElement);
+    const resourceID = (resource.node.defaultChild as CfnResource).logicalId;
     this.addOnExitCommands(`/opt/aws/bin/cfn-signal --stack ${stack.stackName} --resource ${resourceID} --region ${stack.region} -e $exitCode || echo 'Failed to send Cloudformation Signal'`);
   }
 
@@ -191,7 +215,7 @@ class WindowsUserData extends UserData {
   private readonly lines: string[] = [];
   private readonly onExitLines: string[] = [];
 
-  constructor() {
+  constructor(private readonly props: WindowsUserDataOptions = {}) {
     super();
   }
 
@@ -208,14 +232,14 @@ class WindowsUserData extends UserData {
       [...(this.renderOnExitLines()),
         ...this.lines,
         ...( this.onExitLines.length > 0 ? ['throw "Success"'] : [] )].join('\n')
-    }</powershell>`;
+    }</powershell>${(this.props.persist ?? false) ? '<persist>true</persist>' : ''}`;
   }
 
   public addS3DownloadCommand(params: S3DownloadOptions): string {
     const localPath = ( params.localFile && params.localFile.length !== 0 ) ? params.localFile : `C:/temp/${ params.bucketKey }`;
     this.addCommands(
       `mkdir (Split-Path -Path '${localPath}' ) -ea 0`,
-      `Read-S3Object -BucketName '${params.bucket.bucketName}' -key '${params.bucketKey}' -file '${localPath}' -ErrorAction Stop`,
+      `Read-S3Object -BucketName '${params.bucket.bucketName}' -key '${params.bucketKey}' -file '${localPath}' -ErrorAction Stop` + (params.region !== undefined ? ` -Region ${params.region}` : ''),
     );
     return localPath;
   }
@@ -229,7 +253,7 @@ class WindowsUserData extends UserData {
 
   public addSignalOnExitCommand( resource: Resource ): void {
     const stack = Stack.of(resource);
-    const resourceID = stack.getLogicalId(resource.node.defaultChild as CfnElement);
+    const resourceID = (resource.node.defaultChild as CfnResource).logicalId;
 
     this.addOnExitCommands(`cfn-signal --stack ${stack.stackName} --resource ${resourceID} --region ${stack.region} --success ($success.ToString().ToLower())`);
   }
@@ -483,7 +507,11 @@ export class MultipartUserData extends UserData {
    * If `makeDefault` is false, then this is the same as calling:
    *
    * ```ts
-   * multiPart.addPart(MultipartBody.fromUserData(userData, contentType));
+   * declare const multiPart: ec2.MultipartUserData;
+   * declare const userData: ec2.UserData;
+   * declare const contentType: string;
+   *
+   * multiPart.addPart(ec2.MultipartBody.fromUserData(userData, contentType));
    * ```
    *
    * An undefined `makeDefault` defaults to either:

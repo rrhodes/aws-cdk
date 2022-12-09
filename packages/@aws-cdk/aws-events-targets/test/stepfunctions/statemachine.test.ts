@@ -1,4 +1,4 @@
-import '@aws-cdk/assert-internal/jest';
+import { Template } from '@aws-cdk/assertions';
 import * as events from '@aws-cdk/aws-events';
 import * as iam from '@aws-cdk/aws-iam';
 import * as sqs from '@aws-cdk/aws-sqs';
@@ -22,14 +22,14 @@ test('State machine can be used as Event Rule target', () => {
   }));
 
   // THEN
-  expect(stack).toHaveResourceLike('AWS::Events::Rule', {
+  Template.fromStack(stack).hasResourceProperties('AWS::Events::Rule', {
     Targets: [
       {
         Input: '{"SomeParam":"SomeValue"}',
       },
     ],
   });
-  expect(stack).toHaveResourceLike('AWS::IAM::Role', {
+  Template.fromStack(stack).hasResourceProperties('AWS::IAM::Role', {
     AssumeRolePolicyDocument: {
       Statement: [
         {
@@ -42,7 +42,7 @@ test('State machine can be used as Event Rule target', () => {
       ],
     },
   });
-  expect(stack).toHaveResourceLike('AWS::IAM::Policy', {
+  Template.fromStack(stack).hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: {
       Statement: [
         {
@@ -68,23 +68,23 @@ test('Existing role can be used for State machine Rule target', () => {
   });
   const stateMachine = new sfn.StateMachine(stack, 'SM', {
     definition: new sfn.Wait(stack, 'Hello', { time: sfn.WaitTime.duration(cdk.Duration.seconds(10)) }),
-    role,
   });
 
   // WHEN
   rule.addTarget(new targets.SfnStateMachine(stateMachine, {
     input: events.RuleTargetInput.fromObject({ SomeParam: 'SomeValue' }),
+    role: role,
   }));
 
   // THEN
-  expect(stack).toHaveResourceLike('AWS::Events::Rule', {
+  Template.fromStack(stack).hasResourceProperties('AWS::Events::Rule', {
     Targets: [
       {
         Input: '{"SomeParam":"SomeValue"}',
       },
     ],
   });
-  expect(stack).toHaveResourceLike('AWS::IAM::Role', {
+  Template.fromStack(stack).hasResourceProperties('AWS::IAM::Role', {
     AssumeRolePolicyDocument: {
       Statement: [
         {
@@ -97,7 +97,7 @@ test('Existing role can be used for State machine Rule target', () => {
       ],
     },
   });
-  expect(stack).toHaveResourceLike('AWS::IAM::Policy', {
+  Template.fromStack(stack).hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: {
       Statement: [
         {
@@ -125,17 +125,17 @@ test('specifying retry policy', () => {
   });
   const stateMachine = new sfn.StateMachine(stack, 'SM', {
     definition: new sfn.Wait(stack, 'Hello', { time: sfn.WaitTime.duration(cdk.Duration.seconds(10)) }),
-    role,
   });
 
   rule.addTarget(new targets.SfnStateMachine(stateMachine, {
     input: events.RuleTargetInput.fromObject({ SomeParam: 'SomeValue' }),
     maxEventAge: cdk.Duration.hours(2),
     retryAttempts: 2,
+    role: role,
   }));
 
   // THEN
-  expect(stack).toHaveResource('AWS::Events::Rule', {
+  Template.fromStack(stack).hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'rate(1 hour)',
     State: 'ENABLED',
     Targets: [
@@ -151,7 +151,53 @@ test('specifying retry policy', () => {
         },
         RoleArn: {
           'Fn::GetAtt': [
-            'SMEventsRoleB320A902',
+            'Role1ABCC5F0',
+            'Arn',
+          ],
+        },
+      },
+    ],
+  });
+});
+
+test('specifying retry policy with 0 retryAttempts', () => {
+  // GIVEN
+  const stack = new cdk.Stack();
+  const rule = new events.Rule(stack, 'Rule', {
+    schedule: events.Schedule.expression('rate(1 hour)'),
+  });
+
+  // WHEN
+  const role = new iam.Role(stack, 'Role', {
+    assumedBy: new iam.ServicePrincipal('events.amazonaws.com'),
+  });
+  const stateMachine = new sfn.StateMachine(stack, 'SM', {
+    definition: new sfn.Wait(stack, 'Hello', { time: sfn.WaitTime.duration(cdk.Duration.seconds(10)) }),
+  });
+
+  rule.addTarget(new targets.SfnStateMachine(stateMachine, {
+    input: events.RuleTargetInput.fromObject({ SomeParam: 'SomeValue' }),
+    retryAttempts: 0,
+    role: role,
+  }));
+
+  // THEN
+  Template.fromStack(stack).hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'rate(1 hour)',
+    State: 'ENABLED',
+    Targets: [
+      {
+        Arn: {
+          Ref: 'SM934E715A',
+        },
+        Id: 'Target0',
+        Input: '{"SomeParam":"SomeValue"}',
+        RetryPolicy: {
+          MaximumRetryAttempts: 0,
+        },
+        RoleArn: {
+          'Fn::GetAtt': [
+            'Role1ABCC5F0',
             'Arn',
           ],
         },
@@ -176,17 +222,17 @@ test('use a Dead Letter Queue for the rule target', () => {
   });
   const stateMachine = new sfn.StateMachine(stack, 'SM', {
     definition: new sfn.Wait(stack, 'Hello', { time: sfn.WaitTime.duration(cdk.Duration.seconds(10)) }),
-    role,
   });
 
   // WHEN
   rule.addTarget(new targets.SfnStateMachine(stateMachine, {
     input: events.RuleTargetInput.fromObject({ SomeParam: 'SomeValue' }),
     deadLetterQueue: dlq,
+    role: role,
   }));
 
   // the Permission resource should be in the event stack
-  expect(stack).toHaveResource('AWS::Events::Rule', {
+  Template.fromStack(stack).hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'rate(1 minute)',
     State: 'ENABLED',
     Targets: [
@@ -206,7 +252,7 @@ test('use a Dead Letter Queue for the rule target', () => {
         Input: '{"SomeParam":"SomeValue"}',
         RoleArn: {
           'Fn::GetAtt': [
-            'SMEventsRoleB320A902',
+            'Role1ABCC5F0',
             'Arn',
           ],
         },
@@ -214,7 +260,7 @@ test('use a Dead Letter Queue for the rule target', () => {
     ],
   });
 
-  expect(stack).toHaveResource('AWS::SQS::QueuePolicy', {
+  Template.fromStack(stack).hasResourceProperties('AWS::SQS::QueuePolicy', {
     PolicyDocument: {
       Statement: [
         {

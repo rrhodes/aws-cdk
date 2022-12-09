@@ -1,8 +1,8 @@
 import * as iam from '@aws-cdk/aws-iam';
-import { IResource, Lazy, Names, Resource, Stack, Token } from '@aws-cdk/core';
+import { ArnFormat, IResource, Lazy, Names, Resource, Stack, Token } from '@aws-cdk/core';
 import { Construct } from 'constructs';
 import { Archive, BaseArchiveProps } from './archive';
-import { CfnEventBus } from './events.generated';
+import { CfnEventBus, CfnEventBusPolicy } from './events.generated';
 
 /**
  * Interface which all EventBus based classes MUST implement
@@ -169,7 +169,7 @@ export class EventBus extends EventBusBase {
    * @param eventBusArn ARN of imported event bus
    */
   public static fromEventBusArn(scope: Construct, id: string, eventBusArn: string): IEventBus {
-    const parts = Stack.of(scope).parseArn(eventBusArn);
+    const parts = Stack.of(scope).splitArn(eventBusArn, ArnFormat.SLASH_RESOURCE_NAME);
 
     return new ImportedEventBus(scope, id, {
       eventBusArn: eventBusArn,
@@ -239,16 +239,18 @@ export class EventBus extends EventBusBase {
     });
   }
 
-  private static eventBusProps(defaultEventBusName: string, props?: EventBusProps) {
-    if (props) {
-      const { eventBusName, eventSourceName } = props;
-      const eventBusNameRegex = /^[\/\.\-_A-Za-z0-9]{1,256}$/;
+  private static eventBusProps(defaultEventBusName: string, props: EventBusProps = {}) {
+    const { eventBusName, eventSourceName } = props;
+    const eventBusNameRegex = /^[\/\.\-_A-Za-z0-9]{1,256}$/;
 
-      if (eventBusName !== undefined && eventSourceName !== undefined) {
-        throw new Error(
-          '\'eventBusName\' and \'eventSourceName\' cannot both be provided',
-        );
-      } else if (eventBusName !== undefined && !Token.isUnresolved(eventBusName)) {
+    if (eventBusName !== undefined && eventSourceName !== undefined) {
+      throw new Error(
+        '\'eventBusName\' and \'eventSourceName\' cannot both be provided',
+      );
+    }
+
+    if (eventBusName !== undefined) {
+      if (!Token.isUnresolved(eventBusName)) {
         if (eventBusName === 'default') {
           throw new Error(
             '\'eventBusName\' must not be \'default\'',
@@ -262,8 +264,12 @@ export class EventBus extends EventBusBase {
             `'eventBusName' must satisfy: ${eventBusNameRegex}`,
           );
         }
-        return { eventBusName };
-      } else if (eventSourceName !== undefined) {
+      }
+      return { eventBusName };
+    }
+
+    if (eventSourceName !== undefined) {
+      if (!Token.isUnresolved(eventSourceName)) {
         // Ex: aws.partner/PartnerName/acct1/repo1
         const eventSourceNameRegex = /^aws\.partner(\/[\.\-_A-Za-z0-9]+){2,}$/;
         if (!eventSourceNameRegex.test(eventSourceName)) {
@@ -275,9 +281,10 @@ export class EventBus extends EventBusBase {
             `'eventSourceName' must satisfy: ${eventBusNameRegex}`,
           );
         }
-        return { eventBusName: eventSourceName, eventSourceName };
       }
+      return { eventBusName: eventSourceName, eventSourceName };
     }
+
     return { eventBusName: defaultEventBusName };
   }
 
@@ -302,6 +309,8 @@ export class EventBus extends EventBusBase {
    */
   public readonly eventSourceName?: string;
 
+  private policy?: EventBusPolicy;
+
   constructor(scope: Construct, id: string, props?: EventBusProps) {
     const { eventBusName, eventSourceName } = EventBus.eventBusProps(
       Lazy.string({ produce: () => Names.uniqueId(this) }),
@@ -311,7 +320,7 @@ export class EventBus extends EventBusBase {
     super(scope, id, { physicalName: eventBusName });
 
     const eventBus = new CfnEventBus(this, 'Resource', {
-      name: eventBusName,
+      name: this.physicalName,
       eventSourceName,
     });
 
@@ -325,6 +334,28 @@ export class EventBus extends EventBusBase {
     this.eventBusPolicy = eventBus.attrPolicy;
     this.eventSourceName = eventBus.eventSourceName;
   }
+
+  /**
+   * Adds a statement to the IAM resource policy associated with this event bus.
+   */
+  public addToResourcePolicy(statement: iam.PolicyStatement): iam.AddToResourcePolicyResult {
+    if (statement.sid == null) {
+      throw new Error('Event Bus policy statements must have a sid');
+    }
+
+    if (this.policy) {
+      // The policy can contain only one statement
+      return { statementAdded: false };
+    }
+
+    this.policy = new EventBusPolicy(this, 'Policy', {
+      eventBus: this,
+      statement: statement.toJSON(),
+      statementId: statement.sid,
+    });
+
+    return { statementAdded: true, policyDependable: this.policy };
+  }
 }
 
 class ImportedEventBus extends EventBusBase {
@@ -332,8 +363,9 @@ class ImportedEventBus extends EventBusBase {
   public readonly eventBusName: string;
   public readonly eventBusPolicy: string;
   public readonly eventSourceName?: string;
+
   constructor(scope: Construct, id: string, attrs: EventBusAttributes) {
-    const arnParts = Stack.of(scope).parseArn(attrs.eventBusArn);
+    const arnParts = Stack.of(scope).splitArn(attrs.eventBusArn, ArnFormat.SLASH_RESOURCE_NAME);
     super(scope, id, {
       account: arnParts.account,
       region: arnParts.region,
@@ -343,5 +375,52 @@ class ImportedEventBus extends EventBusBase {
     this.eventBusName = attrs.eventBusName;
     this.eventBusPolicy = attrs.eventBusPolicy;
     this.eventSourceName = attrs.eventSourceName;
+  }
+}
+
+/**
+ * Properties to associate Event Buses with a policy
+ */
+export interface EventBusPolicyProps {
+  /**
+   * The event bus to which the policy applies
+   */
+  readonly eventBus: IEventBus;
+
+  /**
+   * An IAM Policy Statement to apply to the Event Bus
+   */
+  readonly statement: iam.PolicyStatement;
+
+  /**
+   * An identifier string for the external account that
+   * you are granting permissions to.
+   */
+  readonly statementId: string;
+}
+
+/**
+ * The policy for an Event Bus
+ *
+ * Policies define the operations that are allowed on this resource.
+ *
+ * You almost never need to define this construct directly.
+ *
+ * All AWS resources that support resource policies have a method called
+ * `addToResourcePolicy()`, which will automatically create a new resource
+ * policy if one doesn't exist yet, otherwise it will add to the existing
+ * policy.
+ *
+ * Prefer to use `addToResourcePolicy()` instead.
+ */
+export class EventBusPolicy extends Resource {
+  constructor(scope: Construct, id: string, props: EventBusPolicyProps) {
+    super(scope, id);
+
+    new CfnEventBusPolicy(this, 'Resource', {
+      statementId: props.statementId!,
+      statement: props.statement,
+      eventBusName: props.eventBus.eventBusName,
+    });
   }
 }

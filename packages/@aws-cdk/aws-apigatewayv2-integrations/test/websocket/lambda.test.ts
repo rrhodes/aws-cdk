@@ -1,8 +1,8 @@
-import '@aws-cdk/assert-internal/jest';
+import { Template } from '@aws-cdk/assertions';
 import { WebSocketApi } from '@aws-cdk/aws-apigatewayv2';
 import { Code, Function, Runtime } from '@aws-cdk/aws-lambda';
 import { Stack } from '@aws-cdk/core';
-import { LambdaWebSocketIntegration } from '../../lib';
+import { WebSocketLambdaIntegration } from '../../lib';
 
 
 describe('LambdaWebSocketIntegration', () => {
@@ -14,12 +14,12 @@ describe('LambdaWebSocketIntegration', () => {
     // WHEN
     new WebSocketApi(stack, 'Api', {
       connectRouteOptions: {
-        integration: new LambdaWebSocketIntegration({ handler: fooFn }),
+        integration: new WebSocketLambdaIntegration('Integration', fooFn),
       },
     });
 
     // THEN
-    expect(stack).toHaveResource('AWS::ApiGatewayV2::Integration', {
+    Template.fromStack(stack).hasResourceProperties('AWS::ApiGatewayV2::Integration', {
       IntegrationType: 'AWS_PROXY',
       IntegrationUri: {
         'Fn::Join': [
@@ -51,7 +51,7 @@ describe('LambdaWebSocketIntegration', () => {
 function fooFunction(stack: Stack, id: string) {
   return new Function(stack, id, {
     code: Code.fromInline('foo'),
-    runtime: Runtime.NODEJS_12_X,
+    runtime: Runtime.NODEJS_14_X,
     handler: 'index.handler',
   });
 }

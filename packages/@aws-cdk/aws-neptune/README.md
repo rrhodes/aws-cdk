@@ -36,7 +36,7 @@ To set up a Neptune database, define a `DatabaseCluster`. You must always launch
 ```ts
 const cluster = new neptune.DatabaseCluster(this, 'Database', {
   vpc,
-  instanceType: neptune.InstanceType.R5_LARGE
+  instanceType: neptune.InstanceType.R5_LARGE,
 });
 ```
 
@@ -70,10 +70,12 @@ The following example shows enabling IAM authentication for a database cluster a
 const cluster = new neptune.DatabaseCluster(this, 'Cluster', {
   vpc,
   instanceType: neptune.InstanceType.R5_LARGE,
-  iamAuthentication: true, // Optional - will be automatically set if you call grantConnect().
+  iamAuthentication: true, // Optional - will be automatically set if you call grantConnect() or grant().
 });
 const role = new iam.Role(this, 'DBRole', { assumedBy: new iam.AccountPrincipal(this.account) });
-cluster.grantConnect(role); // Grant the role connection access to the DB.
+// Use one of the following statements to grant the role the necessary permissions
+cluster.grantConnect(role); // Grant the role neptune-db:* access to the DB
+cluster.grant(role, 'neptune-db:ReadDataViaQuery', 'neptune-db:WriteDataViaQuery'); // Grant the role the specified actions to the DB
 ```
 
 ## Customizing parameters
@@ -92,7 +94,7 @@ const clusterParams = new neptune.ClusterParameterGroup(this, 'ClusterParams', {
 const dbParams = new neptune.ParameterGroup(this, 'DbParams', {
   description: 'Db parameter group',
   parameters: {
-    neptune_query_timeout: '120000'
+    neptune_query_timeout: '120000',
   },
 });
 
@@ -104,6 +106,8 @@ const cluster = new neptune.DatabaseCluster(this, 'Database', {
 });
 ```
 
+Note: if you want to use Neptune engine `1.2.0.0` or later, you need to specify the corresponding `engineVersion` prop to `neptune.DatabaseCluster` and `family` prop of `ParameterGroupFamily.NEPTUNE_1_2` to `neptune.ClusterParameterGroup` and `neptune.ParameterGroup`.
+
 ## Adding replicas
 
 `DatabaseCluster` allows launching replicas along with the writer instance. This can be specified using the `instanceCount`
@@ -113,15 +117,75 @@ attribute.
 const cluster = new neptune.DatabaseCluster(this, 'Database', {
   vpc,
   instanceType: neptune.InstanceType.R5_LARGE,
-  instances: 2
+  instances: 2,
 });
 ```
 
-Additionally it is also possible to add replicas using `DatabaseInstance` for an existing cluster.
+Additionally, it is also possible to add replicas using `DatabaseInstance` for an existing cluster.
 
 ```ts fixture=with-cluster
 const replica1 = new neptune.DatabaseInstance(this, 'Instance', {
   cluster,
-  instanceType: neptune.InstanceType.R5_LARGE
+  instanceType: neptune.InstanceType.R5_LARGE,
 });
 ```
+
+## Automatic minor version upgrades
+
+By setting `autoMinorVersionUpgrade` to true, Neptune will automatically update 
+the engine of the entire cluster to the latest minor version after a stabilization 
+window of 2 to 3 weeks. 
+
+```ts
+new neptune.DatabaseCluster(this, 'Cluster', {
+  vpc,
+  instanceType: neptune.InstanceType.R5_LARGE,
+  autoMinorVersionUpgrade: true,
+});
+```
+
+## Logging
+
+Neptune supports various methods for monitoring performance and usage. One of those methods is logging
+
+1. Neptune provides logs e.g. audit logs which can be viewed or downloaded via the AWS Console. Audit logs can be enabled using the `neptune_enable_audit_log` parameter in `ClusterParameterGroup` or `ParameterGroup`
+2. Neptune provides the ability to export those logs to CloudWatch Logs
+
+```ts
+// Cluster parameter group with the neptune_enable_audit_log param set to 1
+const clusterParameterGroup = new neptune.ClusterParameterGroup(this, 'ClusterParams', {
+  description: 'Cluster parameter group',
+  parameters: {
+    neptune_enable_audit_log: '1'
+  },
+});
+
+const cluster = new neptune.DatabaseCluster(this, 'Database', {
+  vpc,
+  instanceType: neptune.InstanceType.R5_LARGE,
+  // Audit logs are enabled via the clusterParameterGroup
+  clusterParameterGroup,
+  // Optionally configuring audit logs to be exported to CloudWatch Logs
+  cloudwatchLogsExports: [neptune.LogType.AUDIT],
+  // Optionally set a retention period on exported CloudWatch Logs
+  cloudwatchLogsRetention: logs.RetentionDays.ONE_MONTH,
+});
+```
+
+For more information on monitoring, refer to https://docs.aws.amazon.com/neptune/latest/userguide/monitoring.html.
+For more information on audit logs, refer to https://docs.aws.amazon.com/neptune/latest/userguide/auditing.html.
+For more information on exporting logs to CloudWatch Logs, refer to https://docs.aws.amazon.com/neptune/latest/userguide/cloudwatch-logs.html.
+
+## Metrics
+
+Both `DatabaseCluster` and `DatabaseInstance` provide a `metric()` method to help with cluster-level and instance-level monitoring.
+
+```ts
+declare const cluster: neptune.DatabaseCluster;
+declare const instance: neptune.DatabaseInstance;
+
+cluster.metric('SparqlRequestsPerSec'); // cluster-level SparqlErrors metric
+instance.metric('SparqlRequestsPerSec') // instance-level SparqlErrors metric
+```
+
+For more details on the available metrics, refer to https://docs.aws.amazon.com/neptune/latest/userguide/cw-metrics.html

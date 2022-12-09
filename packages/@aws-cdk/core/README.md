@@ -1,23 +1,54 @@
-# AWS Cloud Development Kit Core Library
-<!--BEGIN STABILITY BANNER-->
+# AWS Cloud Development Kit Library
 
----
+The AWS CDK construct library provides APIs to define your CDK application and add
+CDK constructs to the application.
 
-![cfn-resources: Stable](https://img.shields.io/badge/cfn--resources-stable-success.svg?style=for-the-badge)
+## Usage
 
-![cdk-constructs: Stable](https://img.shields.io/badge/cdk--constructs-stable-success.svg?style=for-the-badge)
+### Upgrade from CDK 1.x
 
----
+When upgrading from CDK 1.x, remove all dependencies to individual CDK packages
+from your dependencies file and follow the rest of the sections.
 
-<!--END STABILITY BANNER-->
+### Installation
 
-This library includes the basic building blocks of the [AWS Cloud Development Kit](https://github.com/aws/aws-cdk) (AWS CDK). It defines the core classes that are used in the rest of the
-AWS Construct Library.
+To use this package, you need to declare this package and the `constructs` package as
+dependencies.
 
-See the [AWS CDK Developer
-Guide](https://docs.aws.amazon.com/cdk/latest/guide/home.html) for
-information of most of the capabilities of this library. The rest of this
-README will only cover topics not already covered in the Developer Guide.
+According to the kind of project you are developing:
+
+- For projects that are CDK libraries, declare them both under the `devDependencies`
+  **and** `peerDependencies` sections.
+- For CDK apps, declare them under the `dependencies` section only.
+
+### Use in your code
+
+#### Classic import
+
+You can use a classic import to get access to each service namespaces:
+
+```ts
+import { Stack, App, aws_s3 as s3 } from 'aws-cdk-lib';
+
+const app = new App();
+const stack = new Stack(app, 'TestStack');
+
+new s3.Bucket(stack, 'TestBucket');
+```
+
+#### Barrel import
+
+Alternatively, you can use "barrel" imports:
+
+```ts
+import { App, Stack } from 'aws-cdk-lib';
+import { Bucket } from 'aws-cdk-lib/aws-s3';
+
+const app = new App();
+const stack = new Stack(app, 'TestStack');
+
+new Bucket(stack, 'TestBucket');
+```
 
 <!--BEGIN CORE DOCUMENTATION-->
 
@@ -48,7 +79,7 @@ logical application. You can then treat that new unit the same way you used
 to be able to treat a single stack: by instantiating it multiple times
 for different instances of your application.
 
-You can define a custom subclass of `Construct`, holding one or more
+You can define a custom subclass of `Stage`, holding one or more
 `Stack`s, to represent a single logical instance of your application.
 
 As a final note: `Stack`s are not a unit of reuse. They describe physical
@@ -56,6 +87,45 @@ deployment layouts, and as such are best left to application builders to
 organize their deployments with. If you want to vend a reusable construct,
 define it as a subclasses of `Construct`: the consumers of your construct
 will decide where to place it in their own stacks.
+
+## Stack Synthesizers
+
+Each Stack has a *synthesizer*, an object that determines how and where
+the Stack should be synthesized and deployed. The synthesizer controls
+aspects like:
+
+- How does the stack reference assets? (Either through CloudFormation
+  parameters the CLI supplies, or because the Stack knows a predefined
+  location where assets will be uploaded).
+- What roles are used to deploy the stack? These can be bootstrapped
+  roles, roles created in some other way, or just the CLI's current
+  credentials.
+
+The following synthesizers are available:
+
+- `DefaultStackSynthesizer`: recommended. Uses predefined asset locations and
+  roles created by the modern bootstrap template. Access control is done by
+  controlling who can assume the deploy role. This is the default stack
+  synthesizer in CDKv2.
+- `LegacyStackSynthesizer`: Uses CloudFormation parameters to communicate
+  asset locations, and the CLI's current permissions to deploy stacks. The
+  is the default stack synthesizer in CDKv1.
+- `CliCredentialsStackSynthesizer`: Uses predefined asset locations, and the
+  CLI's current permissions.
+
+Each of these synthesizers takes configuration arguments. To configure
+a stack with a synthesizer, pass it as one of its properties:
+
+```ts
+new MyStack(app, 'MyStack', {
+  synthesizer: new DefaultStackSynthesizer({
+    fileAssetsBucketName: 'my-orgs-asset-bucket',
+  }),
+});
+```
+
+For more information on bootstrapping accounts and customizing synthesis,
+see [Bootstrapping in the CDK Developer Guide](https://docs.aws.amazon.com/cdk/latest/guide/bootstrapping.html).
 
 ## Nested Stacks
 
@@ -97,7 +167,8 @@ Nested stacks also support the use of Docker image and file assets.
 ## Accessing resources in a different stack
 
 You can access resources in a different stack, as long as they are in the
-same account and AWS Region. The following example defines the stack `stack1`,
+same account and AWS Region (see [next section](#accessing-resources-in-a-different-stack-and-region) for an exception).
+The following example defines the stack `stack1`,
 which defines an Amazon S3 bucket. Then it defines a second stack, `stack2`,
 which takes the bucket from stack1 as a constructor property.
 
@@ -121,6 +192,56 @@ in the producing stack and an
 [Fn::ImportValue](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference-importvalue.html)
 in the consuming stack to transfer that information from one stack to the
 other.
+
+## Accessing resources in a different stack and region
+
+> **This feature is currently experimental**
+
+You can enable the Stack property `crossRegionReferences`
+in order to access resources in a different stack _and_ region. With this feature flag
+enabled it is possible to do something like creating a CloudFront distribution in `us-east-2` and
+an ACM certificate in `us-east-1`.
+
+```ts
+const stack1 = new Stack(app, 'Stack1', {
+  env: {
+    region: 'us-east-1',
+  },
+  crossRegionReferences: true,
+});
+const cert = new acm.Certificate(stack1, 'Cert', {
+  domainName: '*.example.com',
+  validation: acm.CertificateValidation.fromDns(route53.PublicHostedZone.fromHostedZoneId(stack1, 'Zone', 'Z0329774B51CGXTDQV3X')),
+});
+
+const stack2 = new Stack(app, 'Stack2', {
+  env: {
+    region: 'us-east-2',
+  },
+  crossRegionReferences: true,
+});
+new cloudfront.Distribution(stack2, 'Distribution', {
+  defaultBehavior: {
+    origin: new origins.HttpOrigin('example.com'),
+  },
+  domainNames: ['dev.example.com'],
+  certificate: cert,
+});
+```
+
+When the AWS CDK determines that the resource is in a different stack _and_ is in a different
+region, it will "export" the value by creating a custom resource in the producing stack which
+creates SSM Parameters in the consuming region for each exported value. The parameters will be
+created with the name '/cdk/exports/${consumingStackName}/${export-name}'.
+In order to "import" the exports into the consuming stack a [SSM Dynamic reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references.html#dynamic-references-ssm)
+is used to reference the SSM parameter which was created.
+
+In order to mimic strong references, a Custom Resource is also created in the consuming
+stack which marks the SSM parameters as being "imported". When a parameter has been successfully
+imported, the producing stack cannot update the value.
+
+See the [adr](https://github.com/aws/aws-cdk/blob/main/packages/@aws-cdk/core/adr/cross-region-stack-references)
+for more details on this feature.
 
 ### Removing automatic cross-stack references
 
@@ -172,6 +293,13 @@ Duration.days(7)        // 7 days
 Duration.parse('PT5M')  // 5 minutes
 ```
 
+Durations can be added or subtracted together:
+
+```ts
+Duration.minutes(1).plus(Duration.seconds(60)); // 2 minutes
+Duration.minutes(5).minus(Duration.seconds(10)); // 290 secondes
+```
+
 ## Size (Digital Information Quantity)
 
 To make specification of digital storage quantities unambiguous, a class called
@@ -215,10 +343,27 @@ const secret = SecretValue.secretsManager('secretId', {
 Using AWS Secrets Manager is the recommended way to reference secrets in a CDK app.
 `SecretValue` also supports the following secret sources:
 
- - `SecretValue.plainText(secret)`: stores the secret as plain text in your app and the resulting template (not recommended).
- - `SecretValue.ssmSecure(param, version)`: refers to a secret stored as a SecureString in the SSM Parameter Store.
- - `SecretValue.cfnParameter(param)`: refers to a secret passed through a CloudFormation parameter (must have `NoEcho: true`).
- - `SecretValue.cfnDynamicReference(dynref)`: refers to a secret described by a CloudFormation dynamic reference (used by `ssmSecure` and `secretsManager`).
+- `SecretValue.unsafePlainText(secret)`: stores the secret as plain text in your app and the resulting template (not recommended).
+- `SecretValue.secretsManager(secret)`: refers to a secret stored in Secrets Manager
+- `SecretValue.ssmSecure(param, version)`: refers to a secret stored as a SecureString in the SSM
+ Parameter Store. If you don't specify the exact version, AWS CloudFormation uses the latest
+ version of the parameter.
+- `SecretValue.cfnParameter(param)`: refers to a secret passed through a CloudFormation parameter (must have `NoEcho: true`).
+- `SecretValue.cfnDynamicReference(dynref)`: refers to a secret described by a CloudFormation dynamic reference (used by `ssmSecure` and `secretsManager`).
+- `SecretValue.resourceAttribute(attr)`: refers to a secret returned from a CloudFormation resource creation.
+
+`SecretValue`s should only be passed to constructs that accept properties of type
+`SecretValue`. These constructs are written to ensure your secrets will not be
+exposed where they shouldn't be. If you try to use a `SecretValue` in a
+different location, an error about unsafe secret usage will be thrown at
+synthesis time.
+
+If you rotate the secret's value in Secrets Manager, you must also change at
+least one property on the resource where you are using the secret, to force
+CloudFormation to re-read the secret.
+
+`SecretValue.ssmSecure()` is only supported for a limited set of resources.
+[Click here for a list of supported resources and properties](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references.html#template-parameters-dynamic-patterns-resources).
 
 ## ARN manipulation
 
@@ -230,6 +375,8 @@ this purpose.
 use the region and account of the stack you're calling it on:
 
 ```ts
+declare const stack: Stack;
+
 // Builds "arn:<PARTITION>:lambda:<REGION>:<ACCOUNT>:function:MyFunction"
 stack.formatArn({
   service: 'lambda',
@@ -245,6 +392,8 @@ but in case of a deploy-time value be aware that the result will be another
 deploy-time value which cannot be inspected in the CDK application.
 
 ```ts
+declare const stack: Stack;
+
 // Extracts the function name out of an AWS Lambda Function ARN
 const arnComponents = stack.parseArn(arn, ':');
 const functionName = arnComponents.resourceName;
@@ -278,13 +427,13 @@ relationship between all resources in the scope of `constructA` and all
 resources in the scope of `constructB`.
 
 If you want a single object to represent a set of constructs that are not
-necessarily in the same scope, you can use a `ConcreteDependable`. The
+necessarily in the same scope, you can use a `DependencyGroup`. The
 following creates a single object that represents a dependency on two
 constructs, `constructB` and `constructC`:
 
 ```ts
 // Declare the dependable object
-const bAndC = new ConcreteDependable();
+const bAndC = new DependencyGroup();
 bAndC.add(constructB);
 bAndC.add(constructC);
 
@@ -317,7 +466,17 @@ Custom Resources are CloudFormation resources that are implemented by arbitrary
 user code. They can do arbitrary lookups or modifications during a
 CloudFormation deployment.
 
-To define a custom resource, use the `CustomResource` construct:
+Custom resources are backed by *custom resource providers*. Commonly, these are
+Lambda Functions that are deployed in the same deployment as the one that
+defines the custom resource itself, but they can also be backed by Lambda
+Functions deployed previously, or code responding to SNS Topic events running on
+EC2 instances in a completely different account. For more information on custom
+resource providers, see the next section.
+
+Once you have a provider, each definition of a `CustomResource` construct
+represents one invocation. A single provider can be used for the implementation
+of arbitrarily many custom resource definitions. A single definition looks like
+this:
 
 ```ts
 new CustomResource(this, 'MyMagicalResource', {
@@ -346,8 +505,8 @@ various provider types (ordered from low-level to high-level):
 |----------------------------------------------------------------------|:------------:|:--------------:|:------------------------:|:---------------:|:--------:|:---------:|
 | [sns.Topic](#amazon-sns-topic)                                       | Self-managed | Manual         | Manual                   | Unlimited       | Any      | Depends   |
 | [lambda.Function](#aws-lambda-function)                              | AWS Lambda   | Manual         | Manual                   | 15min           | Any      | Small     |
-| [core.CustomResourceProvider](#the-corecustomresourceprovider-class) | Lambda       | Auto           | Auto                     | 15min           | Node.js  | Small     |
-| [custom-resources.Provider](#the-custom-resource-provider-framework) | Lambda       | Auto           | Auto                     | Unlimited Async | Any      | Large     |
+| [core.CustomResourceProvider](#the-corecustomresourceprovider-class) | AWS Lambda   | Auto           | Auto                     | 15min           | Node.js  | Small     |
+| [custom-resources.Provider](#the-custom-resource-provider-framework) | AWS Lambda   | Auto           | Auto                     | Unlimited Async | Any      | Large     |
 
 Legend:
 
@@ -376,7 +535,11 @@ examples ensures that only a single SNS topic is defined:
 function getOrCreate(scope: Construct): sns.Topic {
   const stack = Stack.of(scope);
   const uniqueid = 'GloballyUniqueIdForSingleton'; // For example, a UUID from `uuidgen`
-  return stack.node.tryFindChild(uniqueid) as sns.Topic  ?? new sns.Topic(stack, uniqueid);
+  const existing = stack.node.tryFindChild(uniqueid);
+  if (existing) {
+    return existing as sns.Topic;
+  }
+  return new sns.Topic(stack, uniqueid);
 }
 ```
 
@@ -386,6 +549,12 @@ Every time a resource event occurs (CREATE/UPDATE/DELETE), an SNS notification
 is sent to the SNS topic. Users must process these notifications (e.g. through a
 fleet of worker hosts) and submit success/failure responses to the
 CloudFormation service.
+
+> You only need to use this type of provider if your custom resource cannot run on AWS Lambda, for reasons other than the 15
+> minute timeout. If you are considering using this type of provider because you want to write a custom resource provider that may need
+> to wait for more than 15 minutes for the API calls to stabilize, have a look at the [`custom-resources`](#the-custom-resource-provider-framework) module first.
+>
+> Refer to the [CloudFormation Custom Resource documentation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html) for information on the contract your custom resource needs to adhere to.
 
 Set `serviceToken` to `topic.topicArn`  in order to use this provider:
 
@@ -403,6 +572,10 @@ An AWS lambda function is called *directly* by CloudFormation for all resource
 events. The handler must take care of explicitly submitting a success/failure
 response to the CloudFormation service and handle various error cases.
 
+> **We do not recommend you use this provider type.** The CDK has wrappers around Lambda Functions that make them easier to work with.
+>
+> If you do want to use this provider, refer to the [CloudFormation Custom Resource documentation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html) for information on the contract your custom resource needs to adhere to.
+
 Set `serviceToken` to `lambda.functionArn` to use this provider:
 
 ```ts
@@ -417,11 +590,16 @@ new CustomResource(this, 'MyResource', {
 
 The class [`@aws-cdk/core.CustomResourceProvider`] offers a basic low-level
 framework designed to implement simple and slim custom resource providers. It
-currently only supports Node.js-based user handlers, and it does not have
+currently only supports Node.js-based user handlers, represents permissions as raw
+JSON blobs instead of `iam.PolicyStatement` objects, and it does not have
 support for asynchronous waiting (handler cannot exceed the 15min lambda
 timeout).
 
 [`@aws-cdk/core.CustomResourceProvider`]: https://docs.aws.amazon.com/cdk/api/latest/docs/@aws-cdk_core.CustomResourceProvider.html
+
+> **As an application builder, we do not recommend you use this provider type.** This provider exists purely for custom resources that are part of the AWS Construct Library.
+>
+> The [`custom-resources`](#the-custom-resource-provider-framework) provider is more convenient to work with and more fully-featured.
 
 The provider has a built-in singleton method which uses the resource type as a
 stack-unique identifier and returns the service token:
@@ -429,7 +607,7 @@ stack-unique identifier and returns the service token:
 ```ts
 const serviceToken = CustomResourceProvider.getOrCreate(this, 'Custom::MyCustomResourceType', {
   codeDirectory: `${__dirname}/my-handler`,
-  runtime: CustomResourceProviderRuntime.NODEJS_12_X,
+  runtime: CustomResourceProviderRuntime.NODEJS_14_X,
   description: "Lambda function created by the custom resource provider",
 });
 
@@ -524,7 +702,7 @@ export class Sum extends Construct {
     const resourceType = 'Custom::Sum';
     const serviceToken = CustomResourceProvider.getOrCreate(this, resourceType, {
       codeDirectory: `${__dirname}/sum-handler`,
-      runtime: CustomResourceProviderRuntime.NODEJS_12_X,
+      runtime: CustomResourceProviderRuntime.NODEJS_14_X,
     });
 
     const resource = new CustomResource(this, 'Resource', {
@@ -554,13 +732,30 @@ built-in singleton method:
 ```ts
 const provider = CustomResourceProvider.getOrCreateProvider(this, 'Custom::MyCustomResourceType', {
   codeDirectory: `${__dirname}/my-handler`,
-  runtime: CustomResourceProviderRuntime.NODEJS_12_X,
+  runtime: CustomResourceProviderRuntime.NODEJS_14_X,
 });
 
 const roleArn = provider.roleArn;
 ```
 
 This role ARN can then be used in resource-based IAM policies.
+
+To add IAM policy statements to this role, use `addToRolePolicy()`:
+
+```ts
+const provider = CustomResourceProvider.getOrCreateProvider(this, 'Custom::MyCustomResourceType', {
+  codeDirectory: `${__dirname}/my-handler`,
+  runtime: CustomResourceProviderRuntime.NODEJS_14_X,
+});
+provider.addToRolePolicy({
+  Effect: 'Allow',
+  Action: 's3:GetObject',
+  Resource: '*',
+})
+```
+
+Note that `addToRolePolicy()` uses direct IAM JSON policy blobs, *not* a
+`iam.PolicyStatement` object like you will see in the rest of the CDK.
 
 #### The Custom Resource Provider Framework
 
@@ -666,7 +861,7 @@ const stack = Stack.of(this);
 
 stack.account; // Returns the AWS::AccountId for this stack (or the literal value if known)
 stack.region;  // Returns the AWS::Region for this stack (or the literal value if known)
-stack.partition;
+stack.partition; // Returns the AWS::Partition for this stack (or the literal value if known)
 ```
 
 [cfn-pseudo-params]: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/pseudo-parameter-reference.html
@@ -708,6 +903,9 @@ can be accessed from the `Fn` class, which provides type-safe methods for each
 intrinsic function as well as condition expressions:
 
 ```ts
+declare const myObjectOrArray: any;
+declare const myArray: any;
+
 // To use Fn::Base64
 Fn.base64('SGVsbG8gQ0RLIQo=');
 
@@ -719,6 +917,12 @@ Fn.conditionAnd(
   // The AWS::Region pseudo-parameter value is NOT equal to "us-east-1"
   Fn.conditionNot(Fn.conditionEquals('us-east-1', Aws.REGION)),
 );
+
+// To use Fn::ToJsonString
+Fn.toJsonString(myObjectOrArray);
+
+// To use Fn::Length
+Fn.len(Fn.split(',', myArray));
 ```
 
 When working with deploy-time values (those for which `Token.isUnresolved`
@@ -753,16 +957,19 @@ CloudFormation [mappings][cfn-mappings] are created and queried using the
 ```ts
 const regionTable = new CfnMapping(this, 'RegionTable', {
   mapping: {
-    regionName: {
-      'us-east-1': 'US East (N. Virginia)',
-      'us-east-2': 'US East (Ohio)',
+    'us-east-1': {
+      regionName: 'US East (N. Virginia)',
+      // ...
+    },
+    'us-east-2': {
+      regionName: 'US East (Ohio)',
       // ...
     },
     // ...
   }
 });
 
-regionTable.findInMap('regionName', Aws.REGION);
+regionTable.findInMap(Aws.REGION, 'regionName')
 ```
 
 This will yield the following template:
@@ -770,9 +977,45 @@ This will yield the following template:
 ```yaml
 Mappings:
   RegionTable:
-    regionName:
-      us-east-1: US East (N. Virginia)
-      us-east-2: US East (Ohio)
+    us-east-1:
+      regionName: US East (N. Virginia)
+    us-east-2:
+      regionName: US East (Ohio)
+```
+
+Mappings can also be synthesized "lazily"; lazy mappings will only render a "Mappings"
+section in the synthesized CloudFormation template if some `findInMap` call is unable to
+immediately return a concrete value due to one or both of the keys being unresolved tokens
+(some value only available at deploy-time).
+
+For example, the following code will not produce anything in the "Mappings" section. The
+call to `findInMap` will be able to resolve the value during synthesis and simply return
+`'US East (Ohio)'`.
+
+```ts
+const regionTable = new CfnMapping(this, 'RegionTable', {
+  mapping: {
+    'us-east-1': {
+      regionName: 'US East (N. Virginia)',
+    },
+    'us-east-2': {
+      regionName: 'US East (Ohio)',
+    },
+  },
+  lazy: true,
+});
+
+regionTable.findInMap('us-east-2', 'regionName');
+```
+
+On the other hand, the following code will produce the "Mappings" section shown above,
+since the top-level key is an unresolved token. The call to `findInMap` will return a token that resolves to
+`{ "Fn::FindInMap": [ "RegionTable", { "Ref": "AWS::Region" }, "regionName" ] }`.
+
+```ts
+declare const regionTable: CfnMapping;
+
+regionTable.findInMap(Aws.REGION, 'regionName');
 ```
 
 [cfn-mappings]: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/mappings-section-structure.html
@@ -868,6 +1111,16 @@ const stack = new Stack(app, 'StackName', {
 
 By default, termination protection is disabled.
 
+### Description
+
+You can add a description of the stack in the same way as `StackProps`.
+
+```ts
+const stack = new Stack(app, 'StackName', {
+  description: 'This is a description.',
+});
+```
+
 ### CfnJson
 
 `CfnJson` allows you to postpone the resolution of a JSON blob from
@@ -913,5 +1166,94 @@ When deploying to AWS CloudFormation, it needs to keep in check the amount of re
 It's possible to synthesize the project with more Resources than the allowed (or even reduce the number of Resources).
 
 Set the context key `@aws-cdk/core:stackResourceLimit` with the proper value, being 0 for disable the limit of resources.
+
+## App Context
+
+[Context values](https://docs.aws.amazon.com/cdk/v2/guide/context.html) are key-value pairs that can be associated with an app, stack, or construct.
+One common use case for context is to use it for enabling/disabling [feature flags](https://docs.aws.amazon.com/cdk/v2/guide/featureflags.html). There are several places
+where context can be specified. They are listed below in the order they are evaluated (items at the
+top take precedence over those below).
+
+- The `node.setContext()` method
+- The `postCliContext` prop when you create an `App`
+- The CLI via the `--context` CLI argument
+- The `cdk.json` file via the `context` key:
+- The `cdk.context.json` file:
+- The `~/.cdk.json` file via the `context` key:
+- The `context` prop when you create an `App`
+
+### Examples of setting context
+
+```ts
+new App({
+  context: {
+    '@aws-cdk/core:newStyleStackSynthesis': true,
+  },
+});
+```
+
+```ts
+const app = new App();
+app.node.setContext('@aws-cdk/core:newStyleStackSynthesis', true);
+```
+
+```ts
+new App({
+  postCliContext: {
+    '@aws-cdk/core:newStyleStackSynthesis': true,
+  },
+});
+```
+
+```console
+cdk synth --context @aws-cdk/core:newStyleStackSynthesis=true
+```
+
+_cdk.json_
+
+```json
+{
+  "context": {
+    "@aws-cdk/core:newStyleStackSynthesis": true
+  }
+}
+```
+
+_cdk.context.json_
+
+```json
+{
+  "@aws-cdk/core:newStyleStackSynthesis": true
+}
+```
+
+_~/.cdk.json_
+
+```json
+{
+  "context": {
+    "@aws-cdk/core:newStyleStackSynthesis": true
+  }
+}
+```
+
+## IAM Permissions Boundary
+
+It is possible to apply an [IAM permissions boundary](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html)
+to all roles within a specific construct scope. The most common use case would
+be to apply a permissions boundary at the `Stage` level.
+
+```ts
+declare const app: App;
+
+const prodStage = new Stage(app, 'ProdStage', {
+  permissionsBoundary: PermissionsBoundary.fromName('cdk-${Qualifier}-PermissionsBoundary'),
+});
+```
+
+Any IAM Roles or Users created within this Stage will have the default
+permissions boundary attached.
+
+For more details see the [Permissions Boundary](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_iam-readme.html#permissions-boundaries) section in the IAM guide.
 
 <!--END CORE DOCUMENTATION-->

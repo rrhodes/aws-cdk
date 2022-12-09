@@ -1,11 +1,7 @@
 import * as codepipeline from '@aws-cdk/aws-codepipeline';
 import * as iam from '@aws-cdk/aws-iam';
-
+import { Construct } from 'constructs';
 import { Action } from '../action';
-
-// keep this import separate from other imports to reduce chance for merge conflicts with v2-main
-// eslint-disable-next-line no-duplicate-imports, import/order
-import { Construct } from '@aws-cdk/core';
 
 /**
  * Construction properties of the {@link ServiceCatalogDeployActionBeta1 ServiceCatalog deploy CodePipeline Action}.
@@ -35,12 +31,8 @@ export interface ServiceCatalogDeployActionBeta1Props extends codepipeline.Commo
 
 /**
  * CodePipeline action to connect to an existing ServiceCatalog product.
-<<<<<<< HEAD:packages/@aws-cdk/aws-codepipeline-actions/lib/servicecatalog/deploy-action.ts
  *
  * **Note**: this class is still experimental, and may have breaking changes in the future!
- *
-=======
->>>>>>> master:packages/@aws-cdk/aws-codepipeline-actions/lib/servicecatalog/deploy-action-beta1.ts
  */
 export class ServiceCatalogDeployActionBeta1 extends Action {
   private readonly templatePath: string;

@@ -5,10 +5,6 @@ import { Duration, NestedStack, Stack } from '@aws-cdk/core';
 import * as cr from '@aws-cdk/custom-resources';
 import { Construct } from 'constructs';
 
-// keep this import separate from other imports to reduce chance for merge conflicts with v2-main
-// eslint-disable-next-line no-duplicate-imports, import/order
-import { Construct as CoreConstruct } from '@aws-cdk/core';
-
 /**
  * Properties for a ReplicaProvider
  */
@@ -27,23 +23,8 @@ export class ReplicaProvider extends NestedStack {
    */
   public static getOrCreate(scope: Construct, props: ReplicaProviderProps = {}) {
     const stack = Stack.of(scope);
-    this.checkManagedPoliciesLimit(stack);
     const uid = '@aws-cdk/aws-dynamodb.ReplicaProvider';
     return stack.node.tryFindChild(uid) as ReplicaProvider ?? new ReplicaProvider(stack, uid, props);
-  }
-
-  // Map of getOrCreate() calls per stack
-  private static getOrCreateCalls = new Map<string, number>();
-
-  private static checkManagedPoliciesLimit(stack: Stack): void {
-    // The custom resource implementation uses IAM managed policies. There's
-    // a limit of 10 managed policies per role in IAM. Throw if we reach this
-    // limit.
-    const calls = this.getOrCreateCalls.get(stack.stackName) ?? 0;
-    if (calls >= 10) {
-      throw new Error('You currently cannot have more than 10 global tables in a single stack. Consider splitting your tables across multiple stacks.');
-    }
-    this.getOrCreateCalls.set(stack.stackName, calls + 1);
   }
 
   /**
@@ -62,14 +43,14 @@ export class ReplicaProvider extends NestedStack {
   public readonly isCompleteHandler: lambda.Function;
 
   private constructor(scope: Construct, id: string, props: ReplicaProviderProps = {}) {
-    super(scope as CoreConstruct, id);
+    super(scope, id);
 
     const code = lambda.Code.fromAsset(path.join(__dirname, 'replica-handler'));
 
     // Issues UpdateTable API calls
     this.onEventHandler = new lambda.Function(this, 'OnEventHandler', {
       code,
-      runtime: lambda.Runtime.NODEJS_12_X,
+      runtime: lambda.Runtime.NODEJS_14_X,
       handler: 'index.onEventHandler',
       timeout: Duration.minutes(5),
     });
@@ -77,7 +58,7 @@ export class ReplicaProvider extends NestedStack {
     // Checks if table is back to `ACTIVE` state
     this.isCompleteHandler = new lambda.Function(this, 'IsCompleteHandler', {
       code,
-      runtime: lambda.Runtime.NODEJS_12_X,
+      runtime: lambda.Runtime.NODEJS_14_X,
       handler: 'index.isCompleteHandler',
       timeout: Duration.seconds(30),
     });

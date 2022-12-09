@@ -1,12 +1,11 @@
 export * from './aspect';
 export * from './tag-aspect';
 
-export * from './construct-compat';
 export * from './token';
 export * from './resolvable';
+export * from './type-hints';
 export * from './lazy';
 export * from './tag-manager';
-export * from './dependency';
 export * from './string-fragments';
 export * from './stack-synthesizers';
 
@@ -62,6 +61,7 @@ export * from './cfn-capabilities';
 export * from './cloudformation.generated';
 
 export * from './feature-flags';
+export * from './permissions-boundary';
 
 // WARNING: Should not be exported, but currently is because of a bug. See the
 // class description for more information.

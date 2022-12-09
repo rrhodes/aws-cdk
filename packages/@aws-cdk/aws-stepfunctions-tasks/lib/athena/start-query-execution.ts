@@ -106,7 +106,19 @@ export class AthenaStartQueryExecution extends sfn.TaskStateBase {
           's3:ListBucketMultipartUploads',
           's3:ListMultipartUploadParts',
           's3:PutObject'],
-        resources: [this.props.resultConfiguration?.outputLocation?.bucketName ? `arn:aws:s3:::${this.props.resultConfiguration?.outputLocation?.bucketName}/${this.props.resultConfiguration?.outputLocation?.objectKey}/*` : '*'], // Need S3 location where data is stored or Athena throws an Unable to verify/create output bucket https://docs.aws.amazon.com/athena/latest/ug/security-iam-athena.html
+        resources: [
+          this.props.resultConfiguration?.outputLocation?.bucketName
+            ? cdk.Stack.of(this).formatArn({
+              // S3 Bucket names are globally unique in a partition,
+              // and so their ARNs have empty region and account components
+              region: '',
+              account: '',
+              service: 's3',
+              resource: this.props.resultConfiguration?.outputLocation?.bucketName,
+              resourceName: this.props.resultConfiguration?.outputLocation?.objectKey,
+            })
+            : '*',
+        ],
       }),
     );
 
@@ -183,40 +195,22 @@ export class AthenaStartQueryExecution extends sfn.TaskStateBase {
    * @internal
    */
   protected _renderTask(): any {
-    if (this.props.resultConfiguration?.outputLocation) {
-      return {
-        Resource: integrationResourceArn('athena', 'startQueryExecution', this.integrationPattern),
-        Parameters: sfn.FieldUtils.renderObject({
-          QueryString: this.props.queryString,
-          ClientRequestToken: this.props.clientRequestToken,
-          QueryExecutionContext: {
-            Catalog: this.props.queryExecutionContext?.catalogName,
-            Database: this.props.queryExecutionContext?.databaseName,
-          },
-          ResultConfiguration: {
-            EncryptionConfiguration: this.renderEncryption(),
-            OutputLocation: `s3://${this.props.resultConfiguration?.outputLocation?.bucketName}/${this.props.resultConfiguration?.outputLocation?.objectKey}/`,
-          },
-          WorkGroup: this.props.workGroup,
-        }),
-      };
-    } else {
-      return {
-        Resource: integrationResourceArn('athena', 'startQueryExecution', this.integrationPattern),
-        Parameters: sfn.FieldUtils.renderObject({
-          QueryString: this.props.queryString,
-          ClientRequestToken: this.props.clientRequestToken,
-          QueryExecutionContext: {
-            Catalog: this.props.queryExecutionContext?.catalogName,
-            Database: this.props.queryExecutionContext?.databaseName,
-          },
-          ResultConfiguration: {
-            EncryptionConfiguration: this.renderEncryption(),
-          },
-          WorkGroup: this.props.workGroup,
-        }),
-      };
-    }
+    return {
+      Resource: integrationResourceArn('athena', 'startQueryExecution', this.integrationPattern),
+      Parameters: sfn.FieldUtils.renderObject({
+        QueryString: this.props.queryString,
+        ClientRequestToken: this.props.clientRequestToken,
+        QueryExecutionContext: (this.props.queryExecutionContext?.catalogName || this.props.queryExecutionContext?.databaseName) ? {
+          Catalog: this.props.queryExecutionContext?.catalogName,
+          Database: this.props.queryExecutionContext?.databaseName,
+        } : undefined,
+        ResultConfiguration: {
+          EncryptionConfiguration: this.renderEncryption(),
+          OutputLocation: this.props.resultConfiguration?.outputLocation ? `s3://${this.props.resultConfiguration.outputLocation.bucketName}/${this.props.resultConfiguration.outputLocation.objectKey}/` : undefined,
+        },
+        WorkGroup: this.props?.workGroup,
+      }),
+    };
   }
 }
 
@@ -230,8 +224,9 @@ export interface ResultConfiguration {
   /**
    * S3 path of query results
    *
+   * Example value: `s3://query-results-bucket/folder/`
+   *
    * @default - Query Result Location set in Athena settings for this workgroup
-   * @example s3://query-results-bucket/folder/
   */
   readonly outputLocation?: s3.Location;
 

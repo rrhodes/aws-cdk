@@ -28,3 +28,5 @@ tsconfig.json
 junit.xml
 jest.config.js
 test/
+!*.lit.ts
+**/*.snapshot

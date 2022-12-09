@@ -6,10 +6,13 @@ import * as logs from '@aws-cdk/aws-logs';
 import * as s3 from '@aws-cdk/aws-s3';
 import * as secretsmanager from '@aws-cdk/aws-secretsmanager';
 import * as core from '@aws-cdk/core';
+import { FeatureFlags } from '@aws-cdk/core';
 import * as cr from '@aws-cdk/custom-resources';
+import { S3_CREATE_DEFAULT_LOGGING_POLICY } from '@aws-cdk/cx-api';
 import * as constructs from 'constructs';
 import { addressOf } from 'constructs/lib/private/uniqueid';
-import { CfnCluster, KafkaVersion } from './';
+import { KafkaVersion } from './';
+import { CfnCluster } from './msk.generated';
 
 /**
  * Represents a MSK Cluster
@@ -312,6 +315,12 @@ export interface SaslAuthProps {
    */
   readonly scram?: boolean;
   /**
+   * Enable IAM access control.
+   *
+   * @default false
+   */
+  readonly iam?: boolean;
+  /**
    * KMS Key to encrypt SASL/SCRAM secrets.
    *
    * You must use a customer master key (CMK) when creating users in secrets manager.
@@ -335,6 +344,11 @@ export interface TlsAuthProps {
 }
 
 /**
+ * SASL + TLS authentication properties
+ */
+export interface SaslTlsAuthProps extends SaslAuthProps, TlsAuthProps { }
+
+/**
  * Configuration properties for client authentication.
  */
 export class ClientAuthentication {
@@ -350,6 +364,13 @@ export class ClientAuthentication {
    */
   public static tls(props: TlsAuthProps): ClientAuthentication {
     return new ClientAuthentication(undefined, props);
+  }
+
+  /**
+   * SASL + TLS authentication
+   */
+  public static saslTls(saslTlsProps: SaslTlsAuthProps): ClientAuthentication {
+    return new ClientAuthentication(saslTlsProps, saslTlsProps);
   }
 
   /**
@@ -425,6 +446,13 @@ export class Cluster extends ClusterBase {
     }
 
     if (
+      props.clientAuthentication?.saslProps?.iam &&
+      props.clientAuthentication?.saslProps?.scram
+    ) {
+      throw Error('Only one client authentication method can be enabled.');
+    }
+
+    if (
       props.encryptionInTransit?.clientBroker ===
         ClientBrokerEncryption.PLAINTEXT &&
       props.clientAuthentication
@@ -435,10 +463,11 @@ export class Cluster extends ClusterBase {
     } else if (
       props.encryptionInTransit?.clientBroker ===
         ClientBrokerEncryption.TLS_PLAINTEXT &&
-      props.clientAuthentication?.saslProps?.scram
+      (props.clientAuthentication?.saslProps?.scram ||
+        props.clientAuthentication?.saslProps?.iam)
     ) {
       throw Error(
-        'To enable SASL/SCRAM authentication, you must only allow TLS-encrypted traffic between clients and brokers.',
+        'To enable SASL/SCRAM or IAM authentication, you must only allow TLS-encrypted traffic between clients and brokers.',
       );
     }
 
@@ -487,6 +516,55 @@ export class Cluster extends ClusterBase {
         }
         : undefined;
 
+    const loggingBucket = props.logging?.s3?.bucket;
+    if (loggingBucket && FeatureFlags.of(this).isEnabled(S3_CREATE_DEFAULT_LOGGING_POLICY)) {
+      const stack = core.Stack.of(this);
+      loggingBucket.addToResourcePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        principals: [
+          new iam.ServicePrincipal('delivery.logs.amazonaws.com'),
+        ],
+        resources: [
+          loggingBucket.arnForObjects(`AWSLogs/${stack.account}/*`),
+        ],
+        actions: ['s3:PutObject'],
+        conditions: {
+          StringEquals: {
+            's3:x-amz-acl': 'bucket-owner-full-control',
+            'aws:SourceAccount': stack.account,
+          },
+          ArnLike: {
+            'aws:SourceArn': stack.formatArn({
+              service: 'logs',
+              resource: '*',
+            }),
+          },
+        },
+      }));
+
+      loggingBucket.addToResourcePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        principals: [
+          new iam.ServicePrincipal('delivery.logs.amazonaws.com'),
+        ],
+        resources: [loggingBucket.bucketArn],
+        actions: [
+          's3:GetBucketAcl',
+          's3:ListBucket',
+        ],
+        conditions: {
+          StringEquals: {
+            'aws:SourceAccount': stack.account,
+          },
+          ArnLike: {
+            'aws:SourceArn': stack.formatArn({
+              service: 'logs',
+              resource: '*',
+            }),
+          },
+        },
+      }));
+    }
     const loggingInfo = {
       brokerLogs: {
         cloudWatchLogs: {
@@ -503,8 +581,8 @@ export class Cluster extends ClusterBase {
             props.logging?.firehoseDeliveryStreamName,
         },
         s3: {
-          enabled: props.logging?.s3?.bucket !== undefined,
-          bucket: props.logging?.s3?.bucket.bucketName,
+          enabled: loggingBucket !== undefined,
+          bucket: loggingBucket?.bucketName,
           prefix: props.logging?.s3?.prefix,
         },
       },
@@ -525,7 +603,7 @@ export class Cluster extends ClusterBase {
         new iam.PolicyStatement({
           sid:
             'Allow access through AWS Secrets Manager for all principals in the account that are authorized to use AWS Secrets Manager',
-          principals: [new iam.Anyone()],
+          principals: [new iam.AnyPrincipal()],
           actions: [
             'kms:Encrypt',
             'kms:Decrypt',
@@ -544,24 +622,41 @@ export class Cluster extends ClusterBase {
         }),
       );
     }
-    const clientAuthentication = props.clientAuthentication
-      ? {
-        sasl: props.clientAuthentication?.saslProps?.scram
-          ? {
-            scram: {
-              enabled: props.clientAuthentication?.saslProps.scram,
-            },
-          }
-          : undefined,
-        tls: props.clientAuthentication?.tlsProps?.certificateAuthorities
-          ? {
-            certificateAuthorityArnList: props.clientAuthentication?.tlsProps?.certificateAuthorities.map(
+
+    let clientAuthentication;
+    if (props.clientAuthentication?.saslProps?.iam) {
+      clientAuthentication = {
+        sasl: { iam: { enabled: props.clientAuthentication.saslProps.iam } },
+      };
+      if (props.clientAuthentication?.tlsProps) {
+        clientAuthentication = {
+          sasl: { iam: { enabled: props.clientAuthentication.saslProps.iam } },
+          tls: {
+            certificateAuthorityArnList: props.clientAuthentication?.tlsProps?.certificateAuthorities?.map(
               (ca) => ca.certificateAuthorityArn,
             ),
-          }
-          : undefined,
+          },
+        };
       }
-      : undefined;
+    } else if (props.clientAuthentication?.saslProps?.scram) {
+      clientAuthentication = {
+        sasl: {
+          scram: {
+            enabled: props.clientAuthentication.saslProps.scram,
+          },
+        },
+      };
+    } else if (
+      props.clientAuthentication?.tlsProps?.certificateAuthorities !== undefined
+    ) {
+      clientAuthentication = {
+        tls: {
+          certificateAuthorityArnList: props.clientAuthentication?.tlsProps?.certificateAuthorities.map(
+            (ca) => ca.certificateAuthorityArn,
+          ),
+        },
+      };
+    }
 
     const resource = new CfnCluster(this, 'Resource', {
       clusterName: props.clusterName,
@@ -715,6 +810,17 @@ export class Cluster extends ClusterBase {
    */
   public get bootstrapBrokersSaslScram(): string {
     return this._bootstrapBrokers('BootstrapBrokerStringSaslScram');
+  }
+
+  /**
+   * Get the list of brokers that a SASL/IAM authenticated client application can use to bootstrap
+   *
+   * Uses a Custom Resource to make an API call to `getBootstrapBrokers` using the Javascript SDK
+   *
+   * @returns - A string containing one or more DNS names (or IP) and TLS port pairs.
+   */
+  public get bootstrapBrokersSaslIam() {
+    return this._bootstrapBrokers('BootstrapBrokerStringSaslIam');
   }
 
   /**

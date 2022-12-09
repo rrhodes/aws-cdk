@@ -9,7 +9,7 @@ export interface BlockDevice {
   /**
    * The device name exposed to the EC2 instance
    *
-   * @example '/dev/sdh', 'xvdh'
+   * Supply a value like `/dev/sdh`, `xvdh`.
    *
    * @see https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html
    */
@@ -18,8 +18,7 @@ export interface BlockDevice {
   /**
    * Defines the block device volume, to be either an Amazon EBS volume or an ephemeral instance store volume
    *
-   * @example BlockDeviceVolume.ebs(15), BlockDeviceVolume.ephemeral(0)
-   *
+   * Supply a value like `BlockDeviceVolume.ebs(15)`, `BlockDeviceVolume.ephemeral(0)`.
    */
   readonly volume: BlockDeviceVolume;
 
@@ -67,6 +66,14 @@ export interface EbsDeviceOptionsBase {
    * @default {@link EbsDeviceVolumeType.GP2}
    */
   readonly volumeType?: EbsDeviceVolumeType;
+
+  /**
+   * The throughput that the volume supports, in MiB/s
+   * Takes a minimum of 125 and maximum of 1000.
+   * @see https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
+   * @default - 125 MiB/s. Only valid on gp3 volumes.
+   */
+  readonly throughput?: number;
 }
 
 /**
@@ -181,11 +188,6 @@ export enum EbsDeviceVolumeType {
    *  Provisioned IOPS SSD - IO1
    */
   IO1 = 'io1',
-
-  /**
-   *  Provisioned IOPS SSD - IO2
-   */
-  IO2 = 'io2',
 
   /**
    * General Purpose SSD - GP2

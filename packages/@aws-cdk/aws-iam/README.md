@@ -11,6 +11,21 @@
 
 <!--END STABILITY BANNER-->
 
+## Security and Safety Dev Guide
+
+For a detailed guide on CDK security and safety please see the [CDK Security And
+Safety Dev Guide](https://github.com/aws/aws-cdk/wiki/Security-And-Safety-Dev-Guide)
+
+The guide will cover topics like:
+
+* What permissions to extend to CDK deployments
+* How to control the permissions of CDK deployments via IAM identities and policies
+* How to use CDK to configure the IAM identities and policies of deployed applications
+* Using Permissions Boundaries with CDK
+
+## Overview
+
+
 Define a role and add permissions to it. This will automatically create and
 attach an IAM policy to the role:
 
@@ -30,8 +45,8 @@ Managed policies can be attached using `xxx.addManagedPolicy(ManagedPolicy.fromA
 Many of the AWS CDK resources have `grant*` methods that allow you to grant other resources access to that resource. As an example, the following code gives a Lambda function write permissions (Put, Update, Delete) to a DynamoDB table.
 
 ```ts
-const fn = new lambda.Function(this, 'Function', functionProps);
-const table = new dynamodb.Table(this, 'Table', tableProps);
+declare const fn: lambda.Function;
+declare const table: dynamodb.Table;
 
 table.grantWriteData(fn);
 ```
@@ -39,13 +54,13 @@ table.grantWriteData(fn);
 The more generic `grant` method allows you to give specific permissions to a resource:
 
 ```ts
-const fn = new lambda.Function(this, 'Function', functionProps);
-const table = new dynamodb.Table(this, 'Table', tableProps);
+declare const fn: lambda.Function;
+declare const table: dynamodb.Table;
 
 table.grant(fn, 'dynamodb:PutItem');
 ```
 
-The `grant*` methods accept an `IGrantable` object. This interface is implemented by IAM principlal resources (groups, users and roles) and resources that assume a role such as a Lambda function, EC2 instance or a Codebuild project.
+The `grant*` methods accept an `IGrantable` object. This interface is implemented by IAM principal resources (groups, users and roles) and resources that assume a role such as a Lambda function, EC2 instance or a Codebuild project.
 
 You can find which `grant*` methods exist for a resource in the [AWS CDK API Reference](https://docs.aws.amazon.com/cdk/api/latest/docs/aws-construct-library.html).
 
@@ -120,6 +135,130 @@ const role = iam.Role.fromRoleArn(this, 'Role', 'arn:aws:iam::123456789012:role/
 });
 ```
 
+### Customizing role creation
+
+It is best practice to allow CDK to manage IAM roles and permissions. You can prevent CDK from
+creating roles by using the `customizeRoles` method for special cases. One such case is using CDK in
+an environment where role creation is not allowed or needs to be managed through a process outside
+of the CDK application.
+
+An example of how to opt in to this behavior is below:
+
+```ts
+declare const stack: Stack;
+iam.Role.customizeRoles(stack);
+```
+
+CDK will not create any IAM roles or policies with the `stack` scope. `cdk synth` will fail and
+it will generate a policy report to the cloud assembly (i.e. cdk.out). The `iam-policy-report.txt`
+report will contain a list of IAM roles and associated permissions that would have been created.
+This report can be used to create the roles with the appropriate permissions outside of
+the CDK application. 
+
+Once the missing roles have been created, their names can be added to the `usePrecreatedRoles`
+property, like shown below:
+
+```ts
+declare const app: App;
+const stack = new Stack(app, 'MyStack');
+iam.Role.customizeRoles(stack, {
+  usePrecreatedRoles: {
+    'MyStack/MyRole': 'my-precreated-role-name',
+  },
+});
+
+new iam.Role(stack, 'MyRole', {
+  assumedBy: new iam.ServicePrincipal('sns.amazonaws.com'),
+});
+```
+
+If any IAM policies reference deploy time values (i.e. ARN of a resource that hasn't been created
+yet) you will have to modify the generated report to be more generic. For example, given the
+following CDK code:
+
+```ts
+declare const app: App;
+const stack = new Stack(app, 'MyStack');
+iam.Role.customizeRoles(stack);
+
+const fn = new lambda.Function(stack, 'MyLambda', {
+  code: new lambda.InlineCode('foo'),
+  handler: 'index.handler',
+  runtime: lambda.Runtime.NODEJS_14_X,
+});
+
+const bucket = new s3.Bucket(stack, 'Bucket');
+bucket.grantRead(fn);
+```
+
+The following report will be generated.
+
+```txt
+<missing role> (MyStack/MyLambda/ServiceRole)
+
+AssumeRole Policy:
+[
+  {
+    "Action": "sts:AssumeRole",
+    "Effect": "Allow",
+    "Principal": {
+      "Service": "lambda.amazonaws.com"
+    }
+  }
+]
+
+Managed Policy ARNs:
+[
+  "arn:(PARTITION):iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+]
+
+Managed Policies Statements:
+NONE
+
+Identity Policy Statements:
+[
+  {
+    "Action": [
+      "s3:GetObject*",
+      "s3:GetBucket*",
+      "s3:List*"
+    ],
+    "Effect": "Allow",
+    "Resource": [
+      "(MyStack/Bucket/Resource.Arn)",
+      "(MyStack/Bucket/Resource.Arn)/*"
+    ]
+  }
+]
+```
+
+You would then need to create the role with the inline & managed policies in the report and then
+come back and update the `customizeRoles` with the role name.
+
+```ts
+declare const app: App;
+const stack = new Stack(app, 'MyStack');
+iam.Role.customizeRoles(stack, {
+  usePrecreatedRoles: {
+    'MyStack/MyLambda/ServiceRole': 'my-role-name',
+  }
+});
+```
+
+For more information on configuring permissions see the [Security And Safety Dev
+Guide](https://github.com/aws/aws-cdk/wiki/Security-And-Safety-Dev-Guide)
+
+#### Generating a permissions report
+
+It is also possible to generate the report _without_ preventing the role/policy creation.
+
+```ts
+declare const stack: Stack;
+iam.Role.customizeRoles(stack, {
+  preventSynthesis: false,
+});
+```
+
 ## Configuring an ExternalId
 
 If you need to create Roles that will be assumed by third parties, it is generally a good idea to [require an `ExternalId`
@@ -186,7 +325,7 @@ const role = new iam.Role(this, 'MyRole', {
   assumedBy: new iam.CompositePrincipal(
     new iam.ServicePrincipal('ec2.amazonaws.com'),
     new iam.AccountPrincipal('1818188181818187272')
-  )
+  ),
 });
 ```
 
@@ -202,19 +341,37 @@ const principal = new iam.AccountPrincipal('123456789000')
 
 > NOTE: If you need to define an IAM condition that uses a token (such as a
 > deploy-time attribute of another resource) in a JSON map key, use `CfnJson` to
-> render this condition. See [this test](./test/integ-condition-with-ref.ts) for
+> render this condition. See [this test](./test/integ.condition-with-ref.ts) for
 > an example.
 
 The `WebIdentityPrincipal` class can be used as a principal for web identities like
 Cognito, Amazon, Google or Facebook, for example:
 
 ```ts
-const principal = new iam.WebIdentityPrincipal('cognito-identity.amazonaws.com')
-  .withConditions({
-    "StringEquals": { "cognito-identity.amazonaws.com:aud": "us-east-2:12345678-abcd-abcd-abcd-123456" },
-    "ForAnyValue:StringLike": {"cognito-identity.amazonaws.com:amr": "unauthenticated"}
-  });
+const principal = new iam.WebIdentityPrincipal('cognito-identity.amazonaws.com', {
+  'StringEquals': { 'cognito-identity.amazonaws.com:aud': 'us-east-2:12345678-abcd-abcd-abcd-123456' },
+  'ForAnyValue:StringLike': {'cognito-identity.amazonaws.com:amr': 'unauthenticated' },
+});
 ```
+
+If your identity provider is configured to assume a Role with [session
+tags](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html), you
+need to call `.withSessionTags()` to add the required permissions to the Role's
+policy document:
+
+```ts
+new iam.Role(this, 'Role', {
+  assumedBy: new iam.WebIdentityPrincipal('cognito-identity.amazonaws.com', {
+    'StringEquals': {
+      'cognito-identity.amazonaws.com:aud': 'us-east-2:12345678-abcd-abcd-abcd-123456',
+     },
+    'ForAnyValue:StringLike': {
+      'cognito-identity.amazonaws.com:amr': 'unauthenticated',
+    },
+  }).withSessionTags(),
+});
+```
+
 
 ## Parsing JSON Policy Documents
 
@@ -256,11 +413,11 @@ const customPolicyDocument = iam.PolicyDocument.fromJson(policyDocument);
 
 // You can pass this document as an initial document to a ManagedPolicy
 // or inline Policy.
-const newManagedPolicy = new ManagedPolicy(stack, 'MyNewManagedPolicy', {
-  document: customPolicyDocument
+const newManagedPolicy = new iam.ManagedPolicy(this, 'MyNewManagedPolicy', {
+  document: customPolicyDocument,
 });
-const newPolicy = new Policy(stack, 'MyNewPolicy', {
-  document: customPolicyDocument
+const newPolicy = new iam.Policy(this, 'MyNewPolicy', {
+  document: customPolicyDocument,
 });
 ```
 
@@ -268,7 +425,7 @@ const newPolicy = new Policy(stack, 'MyNewPolicy', {
 
 [Permissions
 Boundaries](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html)
-can be used as a mechanism to prevent privilege esclation by creating new
+can be used as a mechanism to prevent privilege escalation by creating new
 `Role`s. Permissions Boundaries are a Managed Policy, attached to Roles or
 Users, that represent the *maximum* set of permissions they can have. The
 effective set of permissions of a Role (or User) will be the intersection of
@@ -276,6 +433,99 @@ the Identity Policy and the Permissions Boundary attached to the Role (or
 User). Permissions Boundaries are typically created by account
 Administrators, and their use on newly created `Role`s will be enforced by
 IAM policies.
+
+### Bootstrap Permissions Boundary
+
+If a permissions boundary has been enforced as part of CDK bootstrap, all IAM
+Roles and Users that are created as part of the CDK application must be created
+with the permissions boundary attached. The most common scenario will be to
+apply the enforced permissions boundary to the entire CDK app. This can be done
+either by adding the value to `cdk.json` or directly in the `App` constructor.
+
+For example if your organization has created and is enforcing a permissions
+boundary with the name
+`cdk-${Qualifier}-PermissionsBoundary`
+
+```json
+{
+  "context": {
+     "@aws-cdk/core:permissionsBoundary": {
+	   "name": "cdk-${Qualifier}-PermissionsBoundary"
+	 }
+  }
+}
+```
+
+OR
+
+```ts
+new App({
+  context: {
+    [PERMISSIONS_BOUNDARY_CONTEXT_KEY]: {
+      name: 'cdk-${Qualifier}-PermissionsBoundary',
+    },
+  },
+});
+```
+
+Another scenario might be if your organization enforces different permissions
+boundaries for different environments. For example your CDK application may have
+
+* `DevStage` that deploys to a personal dev environment where you have elevated
+privileges
+* `BetaStage` that deploys to a beta environment which and has a relaxed
+	permissions boundary
+* `GammaStage` that deploys to a gamma environment which has the prod
+	permissions boundary
+* `ProdStage` that deploys to the prod environment and has the prod permissions
+	boundary
+
+```ts
+declare const app: App;
+
+new Stage(app, 'DevStage');
+
+new Stage(app, 'BetaStage', {
+  permissionsBoundary: PermissionsBoundary.fromName('beta-permissions-boundary'),
+});
+
+new Stage(app, 'GammaStage', {
+  permissionsBoundary: PermissionsBoundary.fromName('prod-permissions-boundary'),
+});
+
+new Stage(app, 'ProdStage', {
+  permissionsBoundary: PermissionsBoundary.fromName('prod-permissions-boundary'),
+});
+```
+
+The provided name can include placeholders for the partition, region, qualifier, and account
+These placeholders will be replaced with the actual values if available. This requires
+that the Stack has the environment specified, it does not work with environment.
+
+* '${AWS::Partition}'
+* '${AWS::Region}'
+* '${AWS::AccountId}'
+* '${Qualifier}'
+
+
+```ts
+declare const app: App;
+
+const prodStage = new Stage(app, 'ProdStage', {
+  permissionsBoundary: PermissionsBoundary.fromName('cdk-${Qualifier}-PermissionsBoundary-${AWS::AccountId}-${AWS::Region}'),
+});
+
+new Stack(prodStage, 'ProdStack', {
+  synthesizer: new DefaultStackSynthesizer({
+    qualifier: 'custom',
+  });
+});
+```
+
+For more information on configuring permissions see the [Security And Safety Dev
+Guide](https://github.com/aws/aws-cdk/wiki/Security-And-Safety-Dev-Guide)
+
+### Custom Permissions Boundary
 
 It is possible to attach Permissions Boundaries to all Roles created in a construct
 tree all at once:
@@ -296,15 +546,18 @@ const boundary2 = new iam.ManagedPolicy(this, 'Boundary2', {
 });
 
 // Directly apply the boundary to a Role you create
+declare const role: iam.Role;
 iam.PermissionsBoundary.of(role).apply(boundary);
 
 // Apply the boundary to an Role that was implicitly created for you
-iam.PermissionsBoundary.of(lambdaFunction).apply(boundary);
+declare const fn: lambda.Function;
+iam.PermissionsBoundary.of(fn).apply(boundary);
 
 // Apply the boundary to all Roles in a stack
-iam.PermissionsBoundary.of(stack).apply(boundary);
+iam.PermissionsBoundary.of(this).apply(boundary);
 
 // Remove a Permissions Boundary that is inherited, for example from the Stack level
+declare const customResource: CustomResource;
 iam.PermissionsBoundary.of(customResource).clear();
 ```
 
@@ -326,7 +579,7 @@ Identity Pools Developer Guide].
 
 The following examples defines an OpenID Connect provider. Two client IDs
 (audiences) are will be able to send authentication requests to
-https://openid/connect.
+<https://openid/connect>.
 
 ```ts
 const provider = new iam.OpenIdConnectProvider(this, 'MyProvider', {
@@ -347,10 +600,13 @@ pool](https://docs.aws.amazon.com/cognito/latest/developerguide/open-id.html)
 you can reference the provider's ARN as follows:
 
 ```ts
+import * as cognito from '@aws-cdk/aws-cognito';
+
+declare const myProvider: iam.OpenIdConnectProvider;
 new cognito.CfnIdentityPool(this, 'IdentityPool', {
   openIdConnectProviderArns: [myProvider.openIdConnectProviderArn],
   // And the other properties for your identity pool
-  allowUnauthenticatedIdentities,
+  allowUnauthenticatedIdentities: false,
 });
 ```
 
@@ -359,7 +615,7 @@ The `OpenIdConnectPrincipal` class can be used as a principal used with a `OpenI
 ```ts
 const provider = new iam.OpenIdConnectProvider(this, 'MyProvider', {
   url: 'https://openid/connect',
-  clientIds: [ 'myclient1', 'myclient2' ]
+  clientIds: [ 'myclient1', 'myclient2' ],
 });
 const principal = new iam.OpenIdConnectPrincipal(provider);
 ```
@@ -410,46 +666,86 @@ new iam.Role(this, 'Role', {
 IAM manages users for your AWS account. To create a new user:
 
 ```ts
-const user = new User(this, 'MyUser');
+const user = new iam.User(this, 'MyUser');
 ```
 
 To import an existing user by name [with path](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html#identifiers-friendly-names):
 
 ```ts
-const user = User.fromUserName(stack, 'MyImportedUserByName', 'johnsmith');
+const user = iam.User.fromUserName(this, 'MyImportedUserByName', 'johnsmith');
 ```
 
 To import an existing user by ARN:
 
 ```ts
-const user = User.fromUserArn(this, 'MyImportedUserByArn', 'arn:aws:iam::123456789012:user/johnsmith');
+const user = iam.User.fromUserArn(this, 'MyImportedUserByArn', 'arn:aws:iam::123456789012:user/johnsmith');
 ```
 
 To import an existing user by attributes:
 
 ```ts
-const user = User.fromUserAttributes(stack, 'MyImportedUserByAttributes', {
+const user = iam.User.fromUserAttributes(this, 'MyImportedUserByAttributes', {
   userArn: 'arn:aws:iam::123456789012:user/johnsmith',
 });
+```
+
+### Access Keys
+
+The ability for a user to make API calls via the CLI or an SDK is enabled by the user having an
+access key pair. To create an access key:
+
+```ts
+const user = new iam.User(this, 'MyUser');
+const accessKey = new iam.AccessKey(this, 'MyAccessKey', { user: user });
+```
+
+You can force CloudFormation to rotate the access key by providing a monotonically increasing `serial`
+property. Simply provide a higher serial value than any number used previously: 
+
+```ts
+const user = new iam.User(this, 'MyUser');
+const accessKey = new iam.AccessKey(this, 'MyAccessKey', { user: user, serial: 1 });
+```
+
+An access key may only be associated with a single user and cannot be "moved" between users. Changing
+the user associated with an access key replaces the access key (and its ID and secret value).
+
+## Groups
+
+An IAM user group is a collection of IAM users. User groups let you specify permissions for multiple users.
+
+```ts
+const group = new iam.Group(this, 'MyGroup');
+```
+
+To import an existing group by ARN:
+
+```ts
+const group = iam.Group.fromGroupArn(this, 'MyImportedGroupByArn', 'arn:aws:iam::account-id:group/group-name');
+```
+
+To import an existing group by name [with path](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html#identifiers-friendly-names):
+
+```ts
+const group = iam.Group.fromGroupName(this, 'MyImportedGroupByName', 'group-name');
 ```
 
 To add a user to a group (both for a new and imported user/group):
 
 ```ts
-const user = new User(this, 'MyUser'); // or User.fromUserName(stack, 'User', 'johnsmith');
-const group = new Group(this, 'MyGroup'); // or Group.fromGroupArn(stack, 'Group', 'arn:aws:iam::account-id:group/group-name');
+const user = new iam.User(this, 'MyUser'); // or User.fromUserName(stack, 'User', 'johnsmith');
+const group = new iam.Group(this, 'MyGroup'); // or Group.fromGroupArn(stack, 'Group', 'arn:aws:iam::account-id:group/group-name');
 
 user.addToGroup(group);
 // or
 group.addUser(user);
 ```
 
-
 ## Features
 
- * Policy name uniqueness is enforced. If two policies by the same name are attached to the same
-   principal, the attachment will fail.
- * Policy names are not required - the CDK logical ID will be used and ensured to be unique.
- * Policies are validated during synthesis to ensure that they have actions, and that policies
-   attached to IAM principals specify relevant resources, while policies attached to resources
-   specify which IAM principals they apply to.
+* Policy name uniqueness is enforced. If two policies by the same name are attached to the same
+    principal, the attachment will fail.
+* Policy names are not required - the CDK logical ID will be used and ensured to be unique.
+* Policies are validated during synthesis to ensure that they have actions, and that policies
+    attached to IAM principals specify relevant resources, while policies attached to resources
+    specify which IAM principals they apply to.

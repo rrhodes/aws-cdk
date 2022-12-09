@@ -1,12 +1,13 @@
-import { IResolveContext, Lazy, Resource, Stack } from '@aws-cdk/core';
+import { ArnFormat, Resource, Stack, Arn, Aws } from '@aws-cdk/core';
+import { getCustomizeRolesConfig, PolicySynthesizer } from '@aws-cdk/core/lib/helpers-internal';
 import { Construct } from 'constructs';
 import { IGroup } from './group';
 import { CfnManagedPolicy } from './iam.generated';
 import { PolicyDocument } from './policy-document';
 import { PolicyStatement } from './policy-statement';
+import { undefinedIfEmpty } from './private/util';
 import { IRole } from './role';
 import { IUser } from './user';
-import { undefinedIfEmpty } from './util';
 
 /**
  * A managed policy
@@ -151,21 +152,18 @@ export class ManagedPolicy extends Resource implements IManagedPolicy {
    * For this managed policy, you only need to know the name to be able to use it.
    *
    * Some managed policy names start with "service-role/", some start with
-   * "job-function/", and some don't start with anything. Do include the
+   * "job-function/", and some don't start with anything. Include the
    * prefix when constructing this object.
    */
   public static fromAwsManagedPolicyName(managedPolicyName: string): IManagedPolicy {
     class AwsManagedPolicy implements IManagedPolicy {
-      public readonly managedPolicyArn = Lazy.uncachedString({
-        produce(ctx: IResolveContext) {
-          return Stack.of(ctx.scope).formatArn({
-            service: 'iam',
-            region: '', // no region for managed policy
-            account: 'aws', // the account for a managed policy is 'aws'
-            resource: 'policy',
-            resourceName: managedPolicyName,
-          });
-        },
+      public readonly managedPolicyArn = Arn.format({
+        partition: Aws.PARTITION,
+        service: 'iam',
+        region: '', // no region for managed policy
+        account: 'aws', // the account for a managed policy is 'aws'
+        resource: 'policy',
+        resourceName: managedPolicyName,
       });
     }
     return new AwsManagedPolicy();
@@ -207,6 +205,7 @@ export class ManagedPolicy extends Resource implements IManagedPolicy {
   private readonly roles = new Array<IRole>();
   private readonly users = new Array<IUser>();
   private readonly groups = new Array<IGroup>();
+  private readonly _precreatedPolicy?: IManagedPolicy;
 
   constructor(scope: Construct, id: string, props: ManagedPolicyProps = {}) {
     super(scope, id, {
@@ -220,15 +219,33 @@ export class ManagedPolicy extends Resource implements IManagedPolicy {
       this.document = props.document;
     }
 
-    const resource = new CfnManagedPolicy(this, 'Resource', {
-      policyDocument: this.document,
-      managedPolicyName: this.physicalName,
-      description: this.description,
-      path: this.path,
-      roles: undefinedIfEmpty(() => this.roles.map(r => r.roleName)),
-      users: undefinedIfEmpty(() => this.users.map(u => u.userName)),
-      groups: undefinedIfEmpty(() => this.groups.map(g => g.groupName)),
-    });
+    const config = getCustomizeRolesConfig(this);
+    const _precreatedPolicy = ManagedPolicy.fromManagedPolicyName(this, 'Imported'+id, id);
+    this.managedPolicyName = id;
+    this.managedPolicyArn = _precreatedPolicy.managedPolicyArn;
+    if (config.enabled) {
+      this._precreatedPolicy = _precreatedPolicy;
+    }
+    if (!config.preventSynthesis) {
+      const resource = new CfnManagedPolicy(this, 'Resource', {
+        policyDocument: this.document,
+        managedPolicyName: this.physicalName,
+        description: this.description,
+        path: this.path,
+        roles: undefinedIfEmpty(() => this.roles.map(r => r.roleName)),
+        users: undefinedIfEmpty(() => this.users.map(u => u.userName)),
+        groups: undefinedIfEmpty(() => this.groups.map(g => g.groupName)),
+      });
+
+      // arn:aws:iam::123456789012:policy/teststack-CreateTestDBPolicy-16M23YE3CS700
+      this.managedPolicyName = this.getResourceNameAttribute(Stack.of(this).splitArn(resource.ref, ArnFormat.SLASH_RESOURCE_NAME).resourceName!);
+      this.managedPolicyArn = this.getResourceArnAttribute(resource.ref, {
+        region: '', // IAM is global in each partition
+        service: 'iam',
+        resource: 'policy',
+        resourceName: this.physicalName,
+      });
+    }
 
     if (props.users) {
       props.users.forEach(u => this.attachToUser(u));
@@ -246,14 +263,7 @@ export class ManagedPolicy extends Resource implements IManagedPolicy {
       props.statements.forEach(p => this.addStatements(p));
     }
 
-    // arn:aws:iam::123456789012:policy/teststack-CreateTestDBPolicy-16M23YE3CS700
-    this.managedPolicyName = this.getResourceNameAttribute(Stack.of(this).parseArn(resource.ref, '/').resourceName!);
-    this.managedPolicyArn = this.getResourceArnAttribute(resource.ref, {
-      region: '', // IAM is global in each partition
-      service: 'iam',
-      resource: 'policy',
-      resourceName: this.physicalName,
-    });
+    this.node.addValidation({ validate: () => this.validateManagedPolicy() });
   }
 
   /**
@@ -287,7 +297,7 @@ export class ManagedPolicy extends Resource implements IManagedPolicy {
     this.groups.push(group);
   }
 
-  protected validate(): string[] {
+  private validateManagedPolicy(): string[] {
     const result = new Array<string>();
 
     // validate that the policy document is not empty
@@ -297,6 +307,12 @@ export class ManagedPolicy extends Resource implements IManagedPolicy {
 
     result.push(...this.document.validateForIdentityPolicy());
 
+    if (result.length === 0 && this._precreatedPolicy) {
+      PolicySynthesizer.getOrCreate(this).addManagedPolicy(this.node.path, {
+        policyStatements: this.document.toJSON()?.Statement,
+        roles: this.roles.map(role => role.node.path),
+      });
+    }
     return result;
   }
 }

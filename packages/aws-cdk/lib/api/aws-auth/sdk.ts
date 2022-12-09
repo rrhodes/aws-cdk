@@ -1,9 +1,24 @@
 import * as AWS from 'aws-sdk';
 import type { ConfigurationOptions } from 'aws-sdk/lib/config-base';
-import { debug, trace } from '../../logging';
-import { cached } from '../../util/functions';
+import { traceMethods } from '../../util/tracing';
+import { debug, trace } from './_env';
 import { AccountAccessKeyCache } from './account-cache';
+import { cached } from './cached';
 import { Account } from './sdk-provider';
+
+// We need to map regions to domain suffixes, and the SDK already has a function to do this.
+// It's not part of the public API, but it's also unlikely to go away.
+//
+// Reuse that function, and add a safety check, so we don't accidentally break if they ever
+// refactor that away.
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const regionUtil = require('aws-sdk/lib/region_config');
+/* eslint-enable @typescript-eslint/no-require-imports */
+
+if (!regionUtil.getEndpointSuffix) {
+  throw new Error('This version of AWS SDK for JS does not have the \'getEndpointSuffix\' function!');
+}
 
 export interface ISDK {
   /**
@@ -22,13 +37,35 @@ export interface ISDK {
    */
   currentAccount(): Promise<Account>;
 
+  getEndpointSuffix(region: string): string;
+
+  /**
+   * Appends the given string as the extra information to put into the User-Agent header for any requests invoked by this SDK.
+   * If the string is 'undefined', this method has no effect.
+   */
+  appendCustomUserAgent(userAgentData?: string): void;
+
+  /**
+   * Removes the given string from the extra User-Agent header data used for requests invoked by this SDK.
+   */
+  removeCustomUserAgent(userAgentData: string): void;
+
+  lambda(): AWS.Lambda;
   cloudFormation(): AWS.CloudFormation;
   ec2(): AWS.EC2;
+  iam(): AWS.IAM;
   ssm(): AWS.SSM;
   s3(): AWS.S3;
   route53(): AWS.Route53;
   ecr(): AWS.ECR;
+  ecs(): AWS.ECS;
   elbv2(): AWS.ELBv2;
+  secretsManager(): AWS.SecretsManager;
+  kms(): AWS.KMS;
+  stepFunctions(): AWS.StepFunctions;
+  codeBuild(): AWS.CodeBuild
+  cloudWatchLogs(): AWS.CloudWatchLogs;
+  appsync(): AWS.AppSync;
 }
 
 /**
@@ -46,6 +83,7 @@ export interface SdkOptions {
 /**
  * Base functionality of SDK without credential fetching
  */
+@traceMethods
 export class SDK implements ISDK {
   private static readonly accountCache = new AccountAccessKeyCache();
 
@@ -66,6 +104,20 @@ export class SDK implements ISDK {
    */
   private readonly cloudFormationRetryOptions = { maxRetries: 10, retryDelayOptions: { base: 1_000 } };
 
+  /**
+   * STS is used to check credential validity, don't do too many retries.
+   */
+  private readonly stsRetryOptions = { maxRetries: 3, retryDelayOptions: { base: 100 } };
+
+  /**
+   * Whether we have proof that the credentials have not expired
+   *
+   * We need to do some manual plumbing around this because the JS SDKv2 treats `ExpiredToken`
+   * as retriable and we have hefty retries on CFN calls making the CLI hang for a good 15 minutes
+   * if the credentials have expired.
+   */
+  private _credentialsValidated = false;
+
   constructor(
     private readonly _credentials: AWS.Credentials,
     region: string,
@@ -82,6 +134,25 @@ export class SDK implements ISDK {
     this.currentRegion = region;
   }
 
+  public appendCustomUserAgent(userAgentData?: string): void {
+    if (!userAgentData) {
+      return;
+    }
+
+    const currentCustomUserAgent = this.config.customUserAgent;
+    this.config.customUserAgent = currentCustomUserAgent
+      ? `${currentCustomUserAgent} ${userAgentData}`
+      : userAgentData;
+  }
+
+  public removeCustomUserAgent(userAgentData: string): void {
+    this.config.customUserAgent = this.config.customUserAgent?.replace(userAgentData, '');
+  }
+
+  public lambda(): AWS.Lambda {
+    return this.wrapServiceErrorHandling(new AWS.Lambda(this.config));
+  }
+
   public cloudFormation(): AWS.CloudFormation {
     return this.wrapServiceErrorHandling(new AWS.CloudFormation({
       ...this.config,
@@ -91,6 +162,10 @@ export class SDK implements ISDK {
 
   public ec2(): AWS.EC2 {
     return this.wrapServiceErrorHandling(new AWS.EC2(this.config));
+  }
+
+  public iam(): AWS.IAM {
+    return this.wrapServiceErrorHandling(new AWS.IAM(this.config));
   }
 
   public ssm(): AWS.SSM {
@@ -109,8 +184,36 @@ export class SDK implements ISDK {
     return this.wrapServiceErrorHandling(new AWS.ECR(this.config));
   }
 
+  public ecs(): AWS.ECS {
+    return this.wrapServiceErrorHandling(new AWS.ECS(this.config));
+  }
+
   public elbv2(): AWS.ELBv2 {
     return this.wrapServiceErrorHandling(new AWS.ELBv2(this.config));
+  }
+
+  public secretsManager(): AWS.SecretsManager {
+    return this.wrapServiceErrorHandling(new AWS.SecretsManager(this.config));
+  }
+
+  public kms(): AWS.KMS {
+    return this.wrapServiceErrorHandling(new AWS.KMS(this.config));
+  }
+
+  public stepFunctions(): AWS.StepFunctions {
+    return this.wrapServiceErrorHandling(new AWS.StepFunctions(this.config));
+  }
+
+  public codeBuild(): AWS.CodeBuild {
+    return this.wrapServiceErrorHandling(new AWS.CodeBuild(this.config));
+  }
+
+  public cloudWatchLogs(): AWS.CloudWatchLogs {
+    return this.wrapServiceErrorHandling(new AWS.CloudWatchLogs(this.config));
+  }
+
+  public appsync(): AWS.AppSync {
+    return this.wrapServiceErrorHandling(new AWS.AppSync(this.config));
   }
 
   public async currentAccount(): Promise<Account> {
@@ -120,13 +223,16 @@ export class SDK implements ISDK {
     return cached(this, CURRENT_ACCOUNT_KEY, () => SDK.accountCache.fetch(this._credentials.accessKeyId, async () => {
       // if we don't have one, resolve from STS and store in cache.
       debug('Looking up default account ID from STS');
-      const result = await new AWS.STS(this.config).getCallerIdentity().promise();
+      const result = await new AWS.STS({ ...this.config, ...this.stsRetryOptions }).getCallerIdentity().promise();
       const accountId = result.Account;
       const partition = result.Arn!.split(':')[1];
       if (!accountId) {
         throw new Error('STS didn\'t return an account ID');
       }
       debug('Default account ID:', accountId);
+
+      // Save another STS call later if this one already succeeded
+      this._credentialsValidated = true;
       return { accountId, partition };
     }));
   }
@@ -152,6 +258,12 @@ export class SDK implements ISDK {
     try {
       await this._credentials.getPromise();
     } catch (e) {
+      if (isUnrecoverableAwsError(e)) {
+        throw e;
+      }
+
+      // Only reason this would fail is if it was an AssumRole. Otherwise,
+      // reading from an INI file or reading env variables is unlikely to fail.
       debug(`Assuming role failed: ${e.message}`);
       throw new Error([
         'Could not assume role in target account',
@@ -163,6 +275,22 @@ export class SDK implements ISDK {
         'with the right \'--trust\', using the latest version of the CDK CLI.',
       ].join(' '));
     }
+  }
+
+  /**
+   * Make sure the the current credentials are not expired
+   */
+  public async validateCredentials() {
+    if (this._credentialsValidated) {
+      return;
+    }
+
+    await new AWS.STS({ ...this.config, ...this.stsRetryOptions }).getCallerIdentity().promise();
+    this._credentialsValidated = true;
+  }
+
+  public getEndpointSuffix(region: string): string {
+    return regionUtil.getEndpointSuffix(region);
   }
 
   /**
@@ -285,4 +413,11 @@ function allChainedExceptionMessages(e: Error | undefined) {
     e = (e as any).originalError;
   }
   return ret.join(': ');
+}
+
+/**
+ * Return whether an error should not be recovered from
+ */
+export function isUnrecoverableAwsError(e: Error) {
+  return (e as any).code === 'ExpiredToken';
 }

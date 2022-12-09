@@ -19,8 +19,10 @@
  * as shown in the following example:
  *
  * ```ts
- * const cfnBucket = bucket.node.findChild('Resource') as cdk.CfnResource;
- * cfnBucket.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+ * declare const bucket: s3.Bucket;
+ *
+ * const cfnBucket = bucket.node.findChild('Resource') as CfnResource;
+ * cfnBucket.applyRemovalPolicy(RemovalPolicy.DESTROY);
  * ```
  */
 export enum RemovalPolicy {
@@ -41,7 +43,7 @@ export enum RemovalPolicy {
    * but saves a snapshot of its data before deleting,
    * so that it can be re-created later.
    * Only available for some stateful resources,
-   * like databases, EFS volumes, etc.
+   * like databases, EC2 volumes, etc.
    *
    * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-attribute-deletionpolicy.html#aws-attribute-deletionpolicy-options
    */

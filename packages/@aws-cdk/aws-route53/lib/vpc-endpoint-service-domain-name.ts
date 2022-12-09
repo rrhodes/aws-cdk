@@ -1,13 +1,9 @@
-import * as crypto from 'crypto';
+import { md5hash } from '@aws-cdk/core/lib/helpers-internal';
 import { IVpcEndpointService } from '@aws-cdk/aws-ec2';
 import { Fn, Names, Stack } from '@aws-cdk/core';
 import { AwsCustomResource, AwsCustomResourcePolicy, PhysicalResourceId } from '@aws-cdk/custom-resources';
 import { Construct } from 'constructs';
 import { IPublicHostedZone, TxtRecord } from '../lib';
-
-// v2 - keep this import as a separate section to reduce merge conflict when forward merging with the v2 branch.
-// eslint-disable-next-line
-import { Construct as CoreConstruct } from '@aws-cdk/core';
 
 /**
  * Properties to configure a VPC Endpoint Service domain name
@@ -38,13 +34,18 @@ export interface VpcEndpointServiceDomainNameProps {
 /**
  * A Private DNS configuration for a VPC endpoint service.
  */
-export class VpcEndpointServiceDomainName extends CoreConstruct {
+export class VpcEndpointServiceDomainName extends Construct {
 
   // Track all domain names created, so someone doesn't accidentally associate two domains with a single service
   private static readonly endpointServices: IVpcEndpointService[] = [];
 
   // Track all domain names created, so someone doesn't accidentally associate two domains with a single service
   private static readonly endpointServicesMap: { [endpointService: string]: string} = {};
+
+  /**
+   * The domain name associated with the private DNS configuration
+   */
+  public domainName: string;
 
   // The way this class works is by using three custom resources and a TxtRecord in conjunction
   // The first custom resource tells the VPC endpoint service to use the given DNS name
@@ -58,16 +59,16 @@ export class VpcEndpointServiceDomainName extends CoreConstruct {
 
     const serviceUniqueId = Names.nodeUniqueId(props.endpointService.node);
     const serviceId = props.endpointService.vpcEndpointServiceId;
-    const privateDnsName = props.domainName;
+    this.domainName = props.domainName;
 
     // Make sure a user doesn't accidentally add multiple domains
     this.validateProps(props);
 
-    VpcEndpointServiceDomainName.endpointServicesMap[serviceUniqueId] = privateDnsName;
+    VpcEndpointServiceDomainName.endpointServicesMap[serviceUniqueId] = this.domainName;
     VpcEndpointServiceDomainName.endpointServices.push(props.endpointService);
 
     // Enable Private DNS on the endpoint service and retrieve the AWS-generated configuration
-    const privateDnsConfiguration = this.getPrivateDnsConfiguration(serviceUniqueId, serviceId, privateDnsName);
+    const privateDnsConfiguration = this.getPrivateDnsConfiguration(serviceUniqueId, serviceId, this.domainName);
 
     // Tell AWS to verify that this account owns the domain attached to the service
     this.verifyPrivateDnsConfiguration(privateDnsConfiguration, props.publicHostedZone);
@@ -224,7 +225,5 @@ interface PrivateDnsConfiguration {
  * Hash a string
  */
 function hashcode(s: string): string {
-  const hash = crypto.createHash('md5');
-  hash.update(s);
-  return hash.digest('hex');
+  return md5hash(s);
 };

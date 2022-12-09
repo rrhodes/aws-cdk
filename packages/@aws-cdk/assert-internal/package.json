@@ -24,23 +24,23 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
-    "@types/jest": "^26.0.23",
-    "cdk-build-tools": "0.0.0",
-    "jest": "^26.6.3",
-    "pkglint": "0.0.0",
-    "ts-jest": "^26.5.6"
+    "@aws-cdk/cdk-build-tools": "0.0.0",
+    "@aws-cdk/pkglint": "0.0.0",
+    "@types/jest": "^27.5.2",
+    "jest": "^27.5.1",
+    "ts-jest": "^27.1.5"
   },
   "dependencies": {
     "@aws-cdk/cloud-assembly-schema": "0.0.0",
     "@aws-cdk/cloudformation-diff": "0.0.0",
     "@aws-cdk/core": "0.0.0",
     "@aws-cdk/cx-api": "0.0.0",
-    "constructs": "^3.3.69"
+    "constructs": "^10.0.0"
   },
   "peerDependencies": {
     "@aws-cdk/core": "0.0.0",
-    "constructs": "^3.3.69",
-    "jest": "^26.6.3"
+    "jest": "^27.5.1",
+    "constructs": "^10.0.0"
   },
   "repository": {
     "url": "https://github.com/aws/aws-cdk.git",
@@ -53,13 +53,10 @@
   ],
   "homepage": "https://github.com/aws/aws-cdk",
   "engines": {
-    "node": ">= 10.13.0 <13 || >=13.7.0"
+    "node": ">= 14.15.0"
   },
-  "stability": "experimental",
-  "maturity": "experimental",
-  "cdk-build": {
-    "jest": true
-  },
+  "stability": "deprecated",
+  "maturity": "deprecated",
   "publishConfig": {
     "tag": "latest"
   },

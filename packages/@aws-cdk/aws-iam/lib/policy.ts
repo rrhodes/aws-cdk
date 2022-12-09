@@ -4,9 +4,9 @@ import { IGroup } from './group';
 import { CfnPolicy } from './iam.generated';
 import { PolicyDocument } from './policy-document';
 import { PolicyStatement } from './policy-statement';
+import { generatePolicyName, undefinedIfEmpty } from './private/util';
 import { IRole } from './role';
 import { IUser } from './user';
-import { generatePolicyName, undefinedIfEmpty } from './util';
 
 /**
  * Represents an IAM Policy
@@ -177,6 +177,8 @@ export class Policy extends Resource implements IPolicy {
     if (props.statements) {
       props.statements.forEach(p => this.addStatements(p));
     }
+
+    this.node.addValidation({ validate: () => this.validatePolicy() });
   }
 
   /**
@@ -223,7 +225,7 @@ export class Policy extends Resource implements IPolicy {
     return this._policyName;
   }
 
-  protected validate(): string[] {
+  private validatePolicy(): string[] {
     const result = new Array<string>();
 
     // validate that the policy document is not empty

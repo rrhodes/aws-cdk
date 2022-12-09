@@ -1,6 +1,8 @@
-import '@aws-cdk/assert-internal/jest';
+import { Template } from '@aws-cdk/assertions';
 import * as cdk from '@aws-cdk/core';
+import { App } from '@aws-cdk/core';
 import * as iam from '../lib';
+import { Role } from '../lib';
 
 describe('IAM lazy role', () => {
   test('creates no resource when unused', () => {
@@ -13,7 +15,7 @@ describe('IAM lazy role', () => {
     });
 
     // THEN
-    expect(stack).not.toHaveResource('AWS::IAM::Role');
+    Template.fromStack(stack).resourceCountIs('AWS::IAM::Role', 0);
   });
 
   test('creates the resource when a property is read', () => {
@@ -27,7 +29,7 @@ describe('IAM lazy role', () => {
 
     // THEN
     expect(roleArn).not.toBeNull();
-    expect(stack).toHaveResource('AWS::IAM::Role', {
+    Template.fromStack(stack).hasResourceProperties('AWS::IAM::Role', {
       AssumeRolePolicyDocument: {
         Version: '2012-10-17',
         Statement: [{
@@ -37,6 +39,28 @@ describe('IAM lazy role', () => {
         }],
       },
     });
+  });
+
+  test('does not create role when using precreatedRoles', () => {
+    // GIVEN
+    const app = new App();
+    const stack = new cdk.Stack(app, 'MyStack');
+    Role.customizeRoles(stack, {
+      usePrecreatedRoles: {
+        'MyStack/Lazy/Default': 'MyRoleName',
+      },
+    });
+
+    // WHEN
+    const roleArn = new iam.LazyRole(stack, 'Lazy', {
+      assumedBy: new iam.ServicePrincipal('test.service'),
+    }).roleArn;
+
+    // THEN
+    expect(roleArn).not.toBeNull();
+    const template = Template.fromStack(stack);
+    template.resourceCountIs('AWS::IAM::Role', 0);
+    template.resourceCountIs('AWS::IAM::Policy', 0);
   });
 
   test('returns appropriate roleName', () => {

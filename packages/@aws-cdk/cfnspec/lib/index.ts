@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import { CfnLintFileSchema } from './_private_schema/cfn-lint';
 import * as schema from './schema';
+import { isPrimitiveAttribute, isListAttribute, isMapAttribute } from './schema';
 export { schema };
 export * from './canned-metrics';
 
@@ -9,8 +10,25 @@ export * from './canned-metrics';
  */
 export function specification(): schema.Specification {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('../spec/specification.json');
+  const spec: schema.Specification = require('../spec/specification.json');
+
+  // Modify spec in place, remove complex attributes
+  for (const resource of Object.values(spec.ResourceTypes)) {
+    resource.Attributes = Object.fromEntries(Object.entries(resource.Attributes ?? [])
+      .filter(([_, attr]) => isPrimitiveAttribute(attr) || isListAttribute(attr) || isMapAttribute(attr) ));
+  }
+
+  return spec;
 }
+
+/**
+ * The complete AWS CloudFormation Resource specification, having any CDK patches and enhancements included in it.
+ */
+export function docs(): schema.CloudFormationDocsFile {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('../spec/cfn-docs.json');
+}
+
 
 /**
  * Return the resource specification for the given typename
@@ -22,6 +40,21 @@ export function resourceSpecification(typeName: string): schema.ResourceType {
   const ret = specification().ResourceTypes[typeName];
   if (!ret) {
     throw new Error(`No such resource type: ${typeName}`);
+  }
+  return ret;
+}
+
+/**
+ * Return documentation for the given type
+ */
+export function typeDocs(resourceName: string, propertyTypeName?: string): schema.CloudFormationTypeDocs {
+  const key = propertyTypeName ? `${resourceName}.${propertyTypeName}` : resourceName;
+  const ret = docs().Types[key];
+  if (!ret) {
+    return {
+      description: '',
+      properties: {},
+    };
   }
   return ret;
 }

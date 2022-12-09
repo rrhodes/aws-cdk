@@ -2,10 +2,10 @@ import * as lambda from '@aws-cdk/aws-lambda';
 import { Duration } from '@aws-cdk/core';
 
 /**
- * The set of properties for event sources that follow the streaming model,
- * such as, Dynamo, Kinesis and Kafka.
+ * The set of properties for streaming event sources shared by
+ * Dynamo, Kinesis and Kafka.
  */
-export interface StreamEventSourceProps {
+export interface BaseStreamEventSourceProps{
   /**
    * The largest number of records that AWS Lambda will retrieve from your event
    * source at the time of invoking your function. Your function receives an
@@ -15,25 +15,46 @@ export interface StreamEventSourceProps {
    * * Minimum value of 1
    * * Maximum value of:
    *   * 1000 for {@link DynamoEventSource}
-   *   * 10000 for {@link KinesisEventSource}
+   *   * 10000 for {@link KinesisEventSource}, {@link ManagedKafkaEventSource} and {@link SelfManagedKafkaEventSource}
    *
    * @default 100
    */
   readonly batchSize?: number;
 
   /**
+   * Where to begin consuming the stream.
+   */
+  readonly startingPosition: lambda.StartingPosition;
+
+  /**
+   * The maximum amount of time to gather records before invoking the function.
+   * Maximum of Duration.minutes(5).
+   *
+   * @see https://docs.aws.amazon.com/lambda/latest/dg/invocation-eventsourcemapping.html#invocation-eventsourcemapping-batching
+   *
+   * @default - Duration.seconds(0) for Kinesis, DynamoDB, and SQS event sources, Duration.millis(500) for MSK, self-managed Kafka, and Amazon MQ.
+   */
+  readonly maxBatchingWindow?: Duration;
+
+  /**
+   * If the stream event source mapping should be enabled.
+   *
+   * @default true
+   */
+  readonly enabled?: boolean;
+}
+
+/**
+ * The set of properties for streaming event sources shared by
+ * Dynamo and Kinesis.
+ */
+export interface StreamEventSourceProps extends BaseStreamEventSourceProps {
+  /**
    * If the function returns an error, split the batch in two and retry.
    *
    * @default false
    */
   readonly bisectBatchOnError?: boolean;
-
-  /**
-   * An Amazon SQS queue or Amazon SNS topic destination for discarded records.
-   *
-   * @default discarded records are ignored
-   */
-  readonly onFailure?: lambda.IEventSourceDlq;
 
   /**
    * The maximum age of a record that Lambda sends to a function for processing.
@@ -66,11 +87,6 @@ export interface StreamEventSourceProps {
   readonly parallelizationFactor?: number;
 
   /**
-   * Where to begin consuming the stream.
-   */
-  readonly startingPosition: lambda.StartingPosition;
-
-  /**
    * Allow functions to return partially successful responses for a batch of records.
    *
    * @see https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-batchfailurereporting
@@ -78,14 +94,6 @@ export interface StreamEventSourceProps {
    * @default false
    */
   readonly reportBatchItemFailures?: boolean;
-
-  /**
-   * The maximum amount of time to gather records before invoking the function.
-   * Maximum of Duration.minutes(5)
-   *
-   * @default Duration.seconds(0)
-   */
-  readonly maxBatchingWindow?: Duration;
 
   /**
    * The size of the tumbling windows to group records sent to DynamoDB or Kinesis
@@ -96,11 +104,18 @@ export interface StreamEventSourceProps {
   readonly tumblingWindow?: Duration;
 
   /**
-   * If the stream event source mapping should be enabled.
+   * An Amazon SQS queue or Amazon SNS topic destination for discarded records.
    *
-   * @default true
+   * @default - discarded records are ignored
    */
-  readonly enabled?: boolean;
+  readonly onFailure?: lambda.IEventSourceDlq;
+
+  /**
+   * Add filter criteria option
+   *
+   * @default - None
+   */
+  readonly filters?: Array<{[key: string]: any}>;
 }
 
 /**
@@ -126,6 +141,7 @@ export abstract class StreamEventSource implements lambda.IEventSource {
       onFailure: this.props.onFailure,
       tumblingWindow: this.props.tumblingWindow,
       enabled: this.props.enabled,
+      filters: this.props.filters,
     };
   }
 }

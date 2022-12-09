@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as cxschema from '@aws-cdk/cloud-assembly-schema';
+import { AssetManifest } from '@aws-cdk/cloud-assembly-schema';
 import * as cxapi from '@aws-cdk/cx-api';
 import { CloudExecutable } from '../lib/api/cxapp/cloud-executable';
 import { Configuration } from '../lib/settings';
@@ -14,10 +15,15 @@ export interface TestStackArtifact {
   env?: string,
   depends?: string[];
   metadata?: cxapi.StackMetadata;
+
+  /** Old-style assets */
   assets?: cxschema.AssetMetadataEntry[];
   properties?: Partial<cxschema.AwsCloudFormationStackProperties>;
   terminationProtection?: boolean;
   displayName?: string;
+
+  /** New-style assets */
+  assetManifest?: AssetManifest;
 }
 
 export interface TestAssembly {
@@ -54,6 +60,7 @@ function addAttributes(assembly: TestAssembly, builder: cxapi.CloudAssemblyBuild
     const templateFile = `${stack.stackName}.template.json`;
     const template = stack.template ?? DEFAULT_FAKE_TEMPLATE;
     fs.writeFileSync(path.join(builder.outdir, templateFile), JSON.stringify(template, undefined, 2));
+    addNestedStacks(templateFile, builder.outdir, template);
 
     // we call patchStackTags here to simulate the tags formatter
     // that is used when building real manifest files.
@@ -68,11 +75,26 @@ function addAttributes(assembly: TestAssembly, builder: cxapi.CloudAssemblyBuild
       builder.addMissing(missing);
     }
 
+    const dependencies = [...stack.depends ?? []];
+
+    if (stack.assetManifest) {
+      const manifestFile = `${stack.stackName}.assets.json`;
+      fs.writeFileSync(path.join(builder.outdir, manifestFile), JSON.stringify(stack.assetManifest, undefined, 2));
+      dependencies.push(`${stack.stackName}.assets`);
+      builder.addArtifact(`${stack.stackName}.assets`, {
+        type: cxschema.ArtifactType.ASSET_MANIFEST,
+        environment: stack.env || 'aws://123456789012/here',
+        properties: {
+          file: manifestFile,
+        },
+      });
+    }
+
     builder.addArtifact(stack.stackName, {
       type: cxschema.ArtifactType.AWS_CLOUDFORMATION_STACK,
       environment: stack.env || 'aws://123456789012/here',
 
-      dependencies: stack.depends,
+      dependencies,
       metadata,
       properties: {
         ...stack.properties,
@@ -81,6 +103,26 @@ function addAttributes(assembly: TestAssembly, builder: cxapi.CloudAssemblyBuild
       },
       displayName: stack.displayName,
     });
+
+  }
+}
+
+function addNestedStacks(templatePath: string, outdir: string, rootStackTemplate?: any) {
+  let template = rootStackTemplate;
+
+  if (!template) {
+    const templatePathWithDir = path.join('nested-stack-templates', templatePath);
+    template = JSON.parse(fs.readFileSync(path.join(__dirname, templatePathWithDir)).toString());
+    fs.writeFileSync(path.join(outdir, templatePath), JSON.stringify(template, undefined, 2));
+  }
+
+  for (const logicalId in template.Resources) {
+    if (template.Resources[logicalId].Type === 'AWS::CloudFormation::Stack') {
+      if (template.Resources[logicalId].Metadata && template.Resources[logicalId].Metadata['aws:asset:path']) {
+        const nestedTemplatePath = template.Resources[logicalId].Metadata['aws:asset:path'];
+        addNestedStacks(nestedTemplatePath, outdir);
+      }
+    }
   }
 }
 
@@ -125,7 +167,7 @@ function patchStackTags(metadata: { [path: string]: cxschema.MetadataEntry[] }):
   return cloned;
 }
 
-export function testStack(stack: TestStackArtifact) {
+export function testStack(stack: TestStackArtifact): cxapi.CloudFormationStackArtifact {
   const assembly = testAssembly({ stacks: [stack] });
   return assembly.getStackByName(stack.stackName);
 }

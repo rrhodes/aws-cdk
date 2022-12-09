@@ -1,8 +1,10 @@
 import * as iam from '@aws-cdk/aws-iam';
-import { FeatureFlags, IResource, Lazy, RemovalPolicy, Resource, Stack, Duration } from '@aws-cdk/core';
+import * as cxschema from '@aws-cdk/cloud-assembly-schema';
+import { FeatureFlags, IResource, Lazy, RemovalPolicy, Resource, ResourceProps, Stack, Duration, Token, ContextProvider, Arn, ArnFormat } from '@aws-cdk/core';
 import * as cxapi from '@aws-cdk/cx-api';
-import { IConstruct, Construct } from 'constructs';
+import { Construct } from 'constructs';
 import { Alias } from './alias';
+import { KeyLookupOptions } from './key-lookup';
 import { CfnKey } from './kms.generated';
 import * as perms from './private/perms';
 
@@ -92,6 +94,12 @@ abstract class KeyBase extends Resource implements IKey {
    */
   private readonly aliases: Alias[] = [];
 
+  constructor(scope: Construct, id: string, props: ResourceProps = {}) {
+    super(scope, id, props);
+
+    this.node.addValidation({ validate: () => this.policy?.validateForResourcePolicy() ?? [] });
+  }
+
   /**
    * Defines a new alias for the key.
    */
@@ -121,12 +129,6 @@ abstract class KeyBase extends Resource implements IKey {
 
     this.policy.addStatements(statement);
     return { statementAdded: true, policyDependable: this.policy };
-  }
-
-  protected validate(): string[] {
-    const errors = super.validate();
-    errors.push(...this.policy?.validateForResourcePolicy() || []);
-    return errors;
   }
 
   /**
@@ -201,48 +203,37 @@ abstract class KeyBase extends Resource implements IKey {
    */
   private granteeStackDependsOnKeyStack(grantee: iam.IGrantable): string | undefined {
     const grantPrincipal = grantee.grantPrincipal;
-    if (!(grantPrincipal instanceof Construct)) {
-      return undefined;
-    }
     // this logic should only apply to newly created
     // (= not imported) resources
-    if (!this.principalIsANewlyCreatedResource(grantPrincipal)) {
+    if (!iam.principalIsOwnedResource(grantPrincipal)) {
       return undefined;
     }
-    // return undefined;
     const keyStack = Stack.of(this);
     const granteeStack = Stack.of(grantPrincipal);
     if (keyStack === granteeStack) {
       return undefined;
     }
+
     return granteeStack.dependencies.includes(keyStack)
       ? granteeStack.account
       : undefined;
   }
 
-  private principalIsANewlyCreatedResource(principal: IConstruct): boolean {
-    // yes, this sucks
-    // this is just a temporary stopgap to stem the bleeding while we work on a proper fix
-    return principal instanceof iam.Role ||
-      principal instanceof iam.User ||
-      principal instanceof iam.Group;
-  }
-
   private isGranteeFromAnotherRegion(grantee: iam.IGrantable): boolean {
-    if (!(grantee instanceof Construct)) {
+    if (!iam.principalIsOwnedResource(grantee.grantPrincipal)) {
       return false;
     }
     const bucketStack = Stack.of(this);
-    const identityStack = Stack.of(grantee);
+    const identityStack = Stack.of(grantee.grantPrincipal);
     return bucketStack.region !== identityStack.region;
   }
 
   private isGranteeFromAnotherAccount(grantee: iam.IGrantable): boolean {
-    if (!(grantee instanceof Construct)) {
+    if (!iam.principalIsOwnedResource(grantee.grantPrincipal)) {
       return false;
     }
     const bucketStack = Stack.of(this);
-    const identityStack = Stack.of(grantee);
+    const identityStack = Stack.of(grantee.grantPrincipal);
     return bucketStack.account !== identityStack.account;
   }
 }
@@ -470,19 +461,21 @@ export class Key extends KeyBase {
       // policies is really the only option
       protected readonly trustAccountIdentities: boolean = true;
 
-      constructor(keyId: string) {
-        super(scope, id);
+      constructor(keyId: string, props: ResourceProps = {}) {
+        super(scope, id, props);
 
         this.keyId = keyId;
       }
     }
 
-    const keyResourceName = Stack.of(scope).parseArn(keyArn).resourceName;
+    const keyResourceName = Stack.of(scope).splitArn(keyArn, ArnFormat.SLASH_RESOURCE_NAME).resourceName;
     if (!keyResourceName) {
       throw new Error(`KMS key ARN must be in the format 'arn:aws:kms:<region>:<account>:key/<keyId>', got: '${keyArn}'`);
     }
 
-    return new Import(keyResourceName);
+    return new Import(keyResourceName, {
+      environmentFromArn: keyArn,
+    });
   }
 
   /**
@@ -532,6 +525,60 @@ export class Key extends KeyBase {
       protected readonly policy = keyPolicy;
       protected readonly trustAccountIdentities = false;
     }(cfnKey, id);
+  }
+
+  /**
+   * Import an existing Key by querying the AWS environment this stack is deployed to.
+   *
+   * This function only needs to be used to use Keys not defined in your CDK
+   * application. If you are looking to share a Key between stacks, you can
+   * pass the `Key` object between stacks and use it as normal. In addition,
+   * it's not necessary to use this method if an interface accepts an `IKey`.
+   * In this case, `Alias.fromAliasName()` can be used which returns an alias
+   * that extends `IKey`.
+   *
+   * Calling this method will lead to a lookup when the CDK CLI is executed.
+   * You can therefore not use any values that will only be available at
+   * CloudFormation execution time (i.e., Tokens).
+   *
+   * The Key information will be cached in `cdk.context.json` and the same Key
+   * will be used on future runs. To refresh the lookup, you will have to
+   * evict the value from the cache using the `cdk context` command. See
+   * https://docs.aws.amazon.com/cdk/latest/guide/context.html for more information.
+   */
+  public static fromLookup(scope: Construct, id: string, options: KeyLookupOptions): IKey {
+    class Import extends KeyBase {
+      public readonly keyArn: string;
+      public readonly keyId: string;
+      protected readonly policy?: iam.PolicyDocument | undefined = undefined;
+      // defaulting true: if we are importing the key the key policy is
+      // undefined and impossible to change here; this means updating identity
+      // policies is really the only option
+      protected readonly trustAccountIdentities: boolean = true;
+
+      constructor(keyId: string, keyArn: string) {
+        super(scope, id);
+
+        this.keyId = keyId;
+        this.keyArn = keyArn;
+      }
+    }
+    if (Token.isUnresolved(options.aliasName)) {
+      throw new Error('All arguments to Key.fromLookup() must be concrete (no Tokens)');
+    }
+
+    const attributes: cxapi.KeyContextResponse = ContextProvider.getValue(scope, {
+      provider: cxschema.ContextProvider.KEY_PROVIDER,
+      props: {
+        aliasName: options.aliasName,
+      } as cxschema.KeyContextQuery,
+      dummyValue: {
+        keyId: '1234abcd-12ab-34cd-56ef-1234567890ab',
+      },
+    }).value;
+
+    return new Import(attributes.keyId,
+      Arn.format({ resource: 'key', service: 'kms', resourceName: attributes.keyId }, Stack.of(scope)));
   }
 
   public readonly keyArn: string;

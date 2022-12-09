@@ -10,9 +10,23 @@ import { EnvironmentFile, EnvironmentFileConfig } from './environment-file';
 import { LinuxParameters } from './linux-parameters';
 import { LogDriver, LogDriverConfig } from './log-drivers/log-driver';
 
-// keep this import separate from other imports to reduce chance for merge conflicts with v2-main
-// eslint-disable-next-line no-duplicate-imports, import/order
-import { Construct as CoreConstruct } from '@aws-cdk/core';
+/**
+ * Specify the secret's version id or version stage
+ */
+export interface SecretVersionInfo {
+  /**
+   * version id of the secret
+   *
+   * @default - use default version id
+   */
+  readonly versionId?: string;
+  /**
+   * version stage of the secret
+   *
+   * @default - use default version stage
+   */
+  readonly versionStage?: string;
+}
 
 /**
  * A secret environment variable.
@@ -42,6 +56,25 @@ export abstract class Secret {
   public static fromSecretsManager(secret: secretsmanager.ISecret, field?: string): Secret {
     return {
       arn: field ? `${secret.secretArn}:${field}::` : secret.secretArn,
+      hasField: !!field,
+      grantRead: grantee => secret.grantRead(grantee),
+    };
+  }
+
+  /**
+   * Creates a environment variable value from a secret stored in AWS Secrets
+   * Manager.
+   *
+   * @param secret the secret stored in AWS Secrets Manager
+   * @param versionInfo the version information to reference the secret
+   * @param field the name of the field with the value that you want to set as
+   * the environment variable value. Only values in JSON format are supported.
+   * If you do not specify a JSON field, then the full content of the secret is
+   * used.
+   */
+  public static fromSecretsManagerVersion(secret: secretsmanager.ISecret, versionInfo: SecretVersionInfo, field?: string): Secret {
+    return {
+      arn: `${secret.secretArn}:${field ?? ''}:${versionInfo.versionStage ?? ''}:${versionInfo.versionId ?? ''}`,
       hasField: !!field,
       grantRead: grantee => secret.grantRead(grantee),
     };
@@ -307,6 +340,15 @@ export interface ContainerDefinitionOptions {
    * @default - No inference accelerators assigned.
    */
   readonly inferenceAcceleratorResources?: string[];
+
+  /**
+   * A list of namespaced kernel parameters to set in the container.
+   *
+   * @default - No system controls are set.
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-taskdefinition-systemcontrol.html
+   * @see https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html#container_definition_systemcontrols
+   */
+  readonly systemControls?: SystemControl[];
 }
 
 /**
@@ -324,7 +366,7 @@ export interface ContainerDefinitionProps extends ContainerDefinitionOptions {
 /**
  * A container definition is used in a task definition to describe the containers that are launched as part of a task.
  */
-export class ContainerDefinition extends CoreConstruct {
+export class ContainerDefinition extends Construct {
   /**
    * The Linux-specific modifications that are applied to the container, such as Linux kernel capabilities.
    */
@@ -394,10 +436,9 @@ export class ContainerDefinition extends CoreConstruct {
   public readonly logDriverConfig?: LogDriverConfig;
 
   /**
-   * Whether this container definition references a specific JSON field of a secret
-   * stored in Secrets Manager.
+   * The name of the image referenced by this container.
    */
-  public readonly referencesSecretJsonField?: boolean;
+  public readonly imageName: string;
 
   /**
    * The inference accelerators referenced by this container.
@@ -411,7 +452,11 @@ export class ContainerDefinition extends CoreConstruct {
 
   private readonly imageConfig: ContainerImageConfig;
 
-  private readonly secrets?: CfnTaskDefinition.SecretProperty[];
+  private readonly secrets: CfnTaskDefinition.SecretProperty[] = [];
+
+  private readonly environment: { [key: string]: string };
+
+  private _namedPorts: Map<string, PortMapping>;
 
   /**
    * Constructs a new instance of the ContainerDefinition class.
@@ -430,22 +475,24 @@ export class ContainerDefinition extends CoreConstruct {
     this.containerName = props.containerName ?? this.node.id;
 
     this.imageConfig = props.image.bind(this, this);
+    this.imageName = this.imageConfig.imageName;
+
+    this._namedPorts = new Map<string, PortMapping>();
+
     if (props.logging) {
       this.logDriverConfig = props.logging.bind(this, this);
     }
 
     if (props.secrets) {
-      this.secrets = [];
       for (const [name, secret] of Object.entries(props.secrets)) {
-        if (secret.hasField) {
-          this.referencesSecretJsonField = true;
-        }
-        secret.grantRead(this.taskDefinition.obtainExecutionRole());
-        this.secrets.push({
-          name,
-          valueFrom: secret.arn,
-        });
+        this.addSecret(name, secret);
       }
+    }
+
+    if (props.environment) {
+      this.environment = { ...props.environment };
+    } else {
+      this.environment = {};
     }
 
     if (props.environmentFiles) {
@@ -524,6 +571,28 @@ export class ContainerDefinition extends CoreConstruct {
           throw new Error(`Host port (${pm.hostPort}) must be left out or equal to container port ${pm.containerPort} for network mode ${this.taskDefinition.networkMode}`);
         }
       }
+      // No empty strings as port mapping names.
+      if (pm.name === '') {
+        throw new Error('Port mapping name cannot be an empty string.');
+      }
+      // Service connect logic.
+      if (pm.name || pm.appProtocol) {
+
+        // Service connect only supports Awsvpc and Bridge network modes.
+        if (![NetworkMode.BRIDGE, NetworkMode.AWS_VPC].includes(this.taskDefinition.networkMode)) {
+          throw new Error(`Service connect related port mapping fields 'name' and 'appProtocol' are not supported for network mode ${this.taskDefinition.networkMode}`);
+        }
+
+        // Name is not set but App Protocol is; this config is meaningless and we should throw.
+        if (!pm.name) {
+          throw new Error('Service connect-related port mapping field \'appProtocol\' cannot be set without \'name\'');
+        }
+
+        if (this._namedPorts.has(pm.name)) {
+          throw new Error(`Port mapping name '${pm.name}' already exists on this container`);
+        }
+        this._namedPorts.set(pm.name, pm);
+      }
 
       if (this.taskDefinition.networkMode === NetworkMode.BRIDGE) {
         if (pm.hostPort === undefined) {
@@ -533,9 +602,27 @@ export class ContainerDefinition extends CoreConstruct {
           };
         }
       }
-
       return pm;
     }));
+  }
+
+  /**
+   * This method adds an environment variable to the container.
+   */
+  public addEnvironment(name: string, value: string) {
+    this.environment[name] = value;
+  }
+
+  /**
+   * This method adds a secret as environment variable to the container.
+   */
+  public addSecret(name: string, secret: Secret) {
+    secret.grantRead(this.taskDefinition.obtainExecutionRole());
+
+    this.secrets.push({
+      name,
+      valueFrom: secret.arn,
+    });
   }
 
   /**
@@ -592,6 +679,26 @@ export class ContainerDefinition extends CoreConstruct {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Returns the port mapping with the given name, if it exists.
+   */
+  public findPortMappingByName(name: string): PortMapping | undefined {
+    return this._namedPorts.get(name);
+  }
+
+  /**
+   * Whether this container definition references a specific JSON field of a secret
+   * stored in Secrets Manager.
+   */
+  public get referencesSecretJsonField(): boolean | undefined {
+    for (const secret of this.secrets) {
+      if (secret.valueFrom.endsWith('::')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -660,15 +767,16 @@ export class ContainerDefinition extends CoreConstruct {
       volumesFrom: cdk.Lazy.any({ produce: () => this.volumesFrom.map(renderVolumeFrom) }, { omitEmptyArray: true }),
       workingDirectory: this.props.workingDirectory,
       logConfiguration: this.logDriverConfig,
-      environment: this.props.environment && renderKV(this.props.environment, 'name', 'value'),
-      environmentFiles: this.environmentFiles && renderEnvironmentFiles(this.environmentFiles),
-      secrets: this.secrets,
+      environment: this.environment && Object.keys(this.environment).length ? renderKV(this.environment, 'name', 'value') : undefined,
+      environmentFiles: this.environmentFiles && renderEnvironmentFiles(cdk.Stack.of(this).partition, this.environmentFiles),
+      secrets: this.secrets.length ? this.secrets : undefined,
       extraHosts: this.props.extraHosts && renderKV(this.props.extraHosts, 'hostname', 'ipAddress'),
       healthCheck: this.props.healthCheck && renderHealthCheck(this.props.healthCheck),
       links: cdk.Lazy.list({ produce: () => this.links }, { omitEmpty: true }),
       linuxParameters: this.linuxParameters && this.linuxParameters.renderLinuxParameters(),
       resourceRequirements: (!this.props.gpuCount && this.inferenceAcceleratorResources.length == 0 ) ? undefined :
         renderResourceRequirements(this.props.gpuCount, this.inferenceAcceleratorResources),
+      systemControls: this.props.systemControls && renderSystemControls(this.props.systemControls),
     };
   }
 }
@@ -732,7 +840,7 @@ function renderKV(env: { [key: string]: string }, keyName: string, valueName: st
   return ret;
 }
 
-function renderEnvironmentFiles(environmentFiles: EnvironmentFileConfig[]): any[] {
+function renderEnvironmentFiles(partition: string, environmentFiles: EnvironmentFileConfig[]): any[] {
   const ret = [];
   for (const environmentFile of environmentFiles) {
     const s3Location = environmentFile.s3Location;
@@ -743,7 +851,7 @@ function renderEnvironmentFiles(environmentFiles: EnvironmentFileConfig[]): any[
 
     ret.push({
       type: environmentFile.fileType,
-      value: `arn:aws:s3:::${s3Location.bucketName}/${s3Location.objectKey}`,
+      value: `arn:${partition}:s3:::${s3Location.bucketName}/${s3Location.objectKey}`,
     });
   }
   return ret;
@@ -937,7 +1045,28 @@ export interface PortMapping {
    *
    * @default TCP
    */
-  readonly protocol?: Protocol
+  readonly protocol?: Protocol;
+
+  /**
+   * The name to give the port mapping.
+   *
+   * Name is required in order to use the port mapping with ECS Service Connect.
+   * This field may only be set when the task definition uses Bridge or Awsvpc network modes.
+   *
+   * @default - no port mapping name
+   */
+  readonly name?: string;
+
+  /**
+   * The protocol used by Service Connect. Valid values are AppProtocol.http, AppProtocol.http2, and
+   * AppProtocol.grpc. The protocol determines what telemetry will be shown in the ECS Console for
+   * Service Connect services using this port mapping.
+   *
+   * This field may only be set when the task definition uses Bridge or Awsvpc network modes.
+   *
+   * @default - no app protocol
+   */
+  readonly appProtocol?: AppProtocol;
 }
 
 /**
@@ -955,11 +1084,41 @@ export enum Protocol {
   UDP = 'udp',
 }
 
+
+/**
+ * Service connect app protocol.
+ */
+export class AppProtocol {
+  /**
+   * HTTP app protocol.
+   */
+  public static http = new AppProtocol('http');
+  /**
+   * HTTP2 app protocol.
+   */
+  public static http2 = new AppProtocol('http2');
+  /**
+   * GRPC app protocol.
+   */
+  public static grpc = new AppProtocol('grpc');
+
+  /**
+   * Custom value.
+   */
+  public readonly value: string;
+
+  protected constructor(value: string) {
+    this.value = value;
+  }
+}
+
 function renderPortMapping(pm: PortMapping): CfnTaskDefinition.PortMappingProperty {
   return {
     containerPort: pm.containerPort,
     hostPort: pm.hostPort,
     protocol: pm.protocol || Protocol.TCP,
+    appProtocol: pm.appProtocol?.value,
+    name: pm.name ? pm.name : undefined,
   };
 }
 
@@ -1039,4 +1198,26 @@ function renderVolumeFrom(vf: VolumeFrom): CfnTaskDefinition.VolumeFromProperty 
     sourceContainer: vf.sourceContainer,
     readOnly: vf.readOnly,
   };
+}
+
+/**
+ * Kernel parameters to set in the container
+ */
+export interface SystemControl {
+  /**
+   * The namespaced kernel parameter for which to set a value.
+   */
+  readonly namespace: string;
+
+  /**
+   * The value for the namespaced kernel parameter specified in namespace.
+   */
+  readonly value: string;
+}
+
+function renderSystemControls(systemControls: SystemControl[]): CfnTaskDefinition.SystemControlProperty[] {
+  return systemControls.map(sc => ({
+    namespace: sc.namespace,
+    value: sc.value,
+  }));
 }

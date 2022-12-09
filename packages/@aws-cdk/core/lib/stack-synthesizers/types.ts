@@ -1,11 +1,18 @@
+import { CloudAssemblyBuilder } from '@aws-cdk/cx-api';
 import { DockerImageAssetLocation, DockerImageAssetSource, FileAssetLocation, FileAssetSource } from '../assets';
-import { ISynthesisSession } from '../construct-compat';
 import { Stack } from '../stack';
 
 /**
  * Encodes information how a certain Stack should be deployed
  */
 export interface IStackSynthesizer {
+  /**
+   * The qualifier used to bootstrap this stack
+   *
+   * @default - no qualifier
+   */
+  readonly bootstrapQualifier?: string;
+
   /**
    * Bind to the stack this environment is going to be used on
    *
@@ -31,4 +38,26 @@ export interface IStackSynthesizer {
    * Synthesize the associated stack to the session
    */
   synthesize(session: ISynthesisSession): void;
+}
+
+/**
+ * Represents a single session of synthesis. Passed into `Construct.synthesize()` methods.
+ */
+export interface ISynthesisSession {
+  /**
+   * The output directory for this synthesis session.
+   */
+  outdir: string;
+
+  /**
+   * Cloud assembly builder.
+   */
+  assembly: CloudAssemblyBuilder;
+
+  /**
+  * Whether the stack should be validated after synthesis to check for error metadata
+  *
+  * @default - false
+  */
+  validateOnSynth?: boolean;
 }

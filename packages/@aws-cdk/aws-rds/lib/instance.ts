@@ -5,15 +5,15 @@ import * as kms from '@aws-cdk/aws-kms';
 import * as logs from '@aws-cdk/aws-logs';
 import * as s3 from '@aws-cdk/aws-s3';
 import * as secretsmanager from '@aws-cdk/aws-secretsmanager';
-import { ArnComponents, Duration, FeatureFlags, IResource, Lazy, RemovalPolicy, Resource, Stack, Token } from '@aws-cdk/core';
+import { ArnComponents, ArnFormat, Duration, FeatureFlags, IResource, Lazy, RemovalPolicy, Resource, Stack, Token, Tokenization } from '@aws-cdk/core';
 import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
 import { DatabaseSecret } from './database-secret';
 import { Endpoint } from './endpoint';
 import { IInstanceEngine } from './instance-engine';
 import { IOptionGroup } from './option-group';
-import { IParameterGroup } from './parameter-group';
-import { DEFAULT_PASSWORD_EXCLUDE_CHARS, defaultDeletionProtection, engineDescription, renderCredentials, setupS3ImportExport, helperRemovalPolicy, renderUnless } from './private/util';
+import { IParameterGroup, ParameterGroup } from './parameter-group';
+import { applyDefaultRotationOptions, defaultDeletionProtection, engineDescription, renderCredentials, setupS3ImportExport, helperRemovalPolicy, renderUnless } from './private/util';
 import { Credentials, PerformanceInsightRetention, RotationMultiUserOptions, RotationSingleUserOptions, SnapshotCredentials } from './props';
 import { DatabaseProxy, DatabaseProxyOptions, ProxyTarget } from './proxy';
 import { CfnDBInstance, CfnDBInstanceProps } from './rds.generated';
@@ -66,6 +66,8 @@ export interface IDatabaseInstance extends IResource, ec2.IConnectable, secretsm
 
   /**
    * Grant the given identity connection access to the database.
+   * **Note**: this method does not currently work, see https://github.com/aws/aws-cdk/issues/11851 for details.
+   * @see https://github.com/aws/aws-cdk/issues/11851
    */
   grantConnect(grantee: iam.IGrantable): iam.Grant;
 
@@ -124,7 +126,7 @@ export abstract class DatabaseInstanceBase extends Resource implements IDatabase
       });
       public readonly instanceIdentifier = attrs.instanceIdentifier;
       public readonly dbInstanceEndpointAddress = attrs.instanceEndpointAddress;
-      public readonly dbInstanceEndpointPort = attrs.port.toString();
+      public readonly dbInstanceEndpointPort = Tokenization.stringifyNumber(attrs.port);
       public readonly instanceEndpoint = new Endpoint(attrs.instanceEndpointAddress, attrs.port);
       public readonly engine = attrs.engine;
       protected enableIamAuthentication = true;
@@ -190,7 +192,7 @@ export abstract class DatabaseInstanceBase extends Resource implements IDatabase
     const commonAnComponents: ArnComponents = {
       service: 'rds',
       resource: 'db',
-      sep: ':',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
     };
     const localArn = Stack.of(this).formatArn({
       ...commonAnComponents,
@@ -254,22 +256,59 @@ export interface ProcessorFeatures {
 
 /**
  * The type of storage.
+ *
+ * @see https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html
  */
 export enum StorageType {
   /**
    * Standard.
+   *
+   * Amazon RDS supports magnetic storage for backward compatibility. It is recommended to use
+   * General Purpose SSD or Provisioned IOPS SSD for any new storage needs.
+   *
+   * @see https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#CHAP_Storage.Magnetic
    */
   STANDARD = 'standard',
 
   /**
-   * General purpose (SSD).
+   * General purpose SSD (gp2).
+   *
+   * Baseline performance determined by volume size
+   *
+   * @see https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#Concepts.Storage.GeneralSSD
    */
   GP2 = 'gp2',
 
   /**
+   * General purpose SSD (gp3).
+   *
+   * Performance scales independently from storage
+   *
+   * @see https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#Concepts.Storage.GeneralSSD
+   */
+  GP3 = 'gp3',
+
+  /**
    * Provisioned IOPS (SSD).
+   *
+   * @see https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#USER_PIOPS
    */
   IO1 = 'io1'
+}
+
+/**
+ * The network type of the DB instance.
+ */
+export enum NetworkType {
+  /**
+   * IPv4 only network type.
+   */
+  IPV4 = 'IPV4',
+
+  /**
+   * Dual-stack network type.
+   */
+  DUAL = 'DUAL'
 }
 
 /**
@@ -300,10 +339,26 @@ export interface DatabaseInstanceNewProps {
   readonly storageType?: StorageType;
 
   /**
+   * The storage throughput, specified in mebibytes per second (MiBps).
+   *
+   * Only applicable for GP3.
+   *
+   * @see https://docs.aws.amazon.com//AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage
+   *
+   * @default - 125 MiBps if allocated storage is less than 400 GiB for MariaDB, MySQL, and PostgreSQL,
+   * less than 200 GiB for Oracle and less than 20 GiB for SQL Server. 500 MiBps otherwise (except for
+   * SQL Server where the default is always 125 MiBps).
+   */
+  readonly storageThroughput?: number;
+
+  /**
    * The number of I/O operations per second (IOPS) that the database provisions.
    * The value must be equal to or greater than 1000.
    *
-   * @default - no provisioned iops
+   * @default - no provisioned iops if storage type is not specified. For GP3: 3,000 IOPS if allocated
+   * storage is less than 400 GiB for MariaDB, MySQL, and PostgreSQL, less than 200 GiB for Oracle and
+   * less than 20 GiB for SQL Server. 12,000 IOPS otherwise (except for SQL Server where the default is
+   * always 3,000 IOPS).
    */
   readonly iops?: number;
 
@@ -360,6 +415,13 @@ export interface DatabaseInstanceNewProps {
   readonly port?: number;
 
   /**
+   * The DB parameter group to associate with the instance.
+   *
+   * @default - no parameter group
+   */
+  readonly parameterGroup?: IParameterGroup;
+
+  /**
    * The option group to associate with the instance.
    *
    * @default - no option group
@@ -380,7 +442,7 @@ export interface DatabaseInstanceNewProps {
    * When creating a read replica, you must enable automatic backups on the source
    * database instance by setting the backup retention to a value other than zero.
    *
-   * @default Duration.days(1)
+   * @default - Duration.days(1) for source instances, disabled for read replicas
    */
   readonly backupRetention?: Duration;
 
@@ -576,7 +638,6 @@ export interface DatabaseInstanceNewProps {
 
   /**
    * Role that will be associated with this DB instance to enable S3 export.
-   * This feature is only supported by the Microsoft SQL Server and Oracle engines.
    *
    * This property must not be used if `s3ExportBuckets` is used.
    *
@@ -591,7 +652,6 @@ export interface DatabaseInstanceNewProps {
 
   /**
    * S3 buckets that you want to load data into.
-   * This feature is only supported by the Microsoft SQL Server and Oracle engines.
    *
    * This property must not be used if `s3ExportRole` is used.
    *
@@ -610,6 +670,13 @@ export interface DatabaseInstanceNewProps {
    * @default - `true` if `vpcSubnets` is `subnetType: SubnetType.PUBLIC`, `false` otherwise
    */
   readonly publiclyAccessible?: boolean;
+
+  /**
+   * The network type of the DB instance.
+   *
+   * @default - IPV4
+   */
+  readonly networkType?: NetworkType;
 }
 
 /**
@@ -683,8 +750,16 @@ abstract class DatabaseInstanceNew extends DatabaseInstanceBase implements IData
       });
     }
 
-    const storageType = props.storageType || StorageType.GP2;
-    const iops = storageType === StorageType.IO1 ? (props.iops || 1000) : undefined;
+    const storageType = props.storageType ?? StorageType.GP2;
+    const iops = defaultIops(storageType, props.iops);
+    if (props.storageThroughput && storageType !== StorageType.GP3) {
+      throw new Error(`The storage throughput can only be specified with GP3 storage type. Got ${storageType}.`);
+    }
+    if (storageType === StorageType.GP3 && props.storageThroughput && iops
+        && !Token.isUnresolved(props.storageThroughput) && !Token.isUnresolved(iops)
+        && props.storageThroughput/iops > 0.25) {
+      throw new Error(`The maximum ratio of storage throughput to IOPS is 0.25. Got ${props.storageThroughput/iops}.`);
+    }
 
     this.cloudwatchLogsExports = props.cloudwatchLogsExports;
     this.cloudwatchLogsRetention = props.cloudwatchLogsRetention;
@@ -708,9 +783,11 @@ abstract class DatabaseInstanceNew extends DatabaseInstanceBase implements IData
     }
 
     const maybeLowercasedInstanceId = FeatureFlags.of(this).isEnabled(cxapi.RDS_LOWERCASE_DB_IDENTIFIER)
+    && !Token.isUnresolved(props.instanceIdentifier)
       ? props.instanceIdentifier?.toLowerCase()
       : props.instanceIdentifier;
 
+    const instanceParameterGroupConfig = props.parameterGroup?.bindToInstance({});
     this.newCfnProps = {
       autoMinorVersionUpgrade: props.autoMinorVersionUpgrade,
       availabilityZone: props.multiAz ? undefined : props.availabilityZone,
@@ -734,21 +811,24 @@ abstract class DatabaseInstanceNew extends DatabaseInstanceBase implements IData
       monitoringInterval: props.monitoringInterval?.toSeconds(),
       monitoringRoleArn: monitoringRole?.roleArn,
       multiAz: props.multiAz,
+      dbParameterGroupName: instanceParameterGroupConfig?.parameterGroupName,
       optionGroupName: props.optionGroup?.optionGroupName,
       performanceInsightsKmsKeyId: props.performanceInsightEncryptionKey?.keyArn,
       performanceInsightsRetentionPeriod: enablePerformanceInsights
         ? (props.performanceInsightRetention || PerformanceInsightRetention.DEFAULT)
         : undefined,
-      port: props.port?.toString(),
+      port: props.port !== undefined ? Tokenization.stringifyNumber(props.port) : undefined,
       preferredBackupWindow: props.preferredBackupWindow,
       preferredMaintenanceWindow: props.preferredMaintenanceWindow,
       processorFeatures: props.processorFeatures && renderProcessorFeatures(props.processorFeatures),
       publiclyAccessible: props.publiclyAccessible ?? (this.vpcPlacement && this.vpcPlacement.subnetType === ec2.SubnetType.PUBLIC),
       storageType,
+      storageThroughput: props.storageThroughput,
       vpcSecurityGroups: securityGroups.map(s => s.securityGroupId),
       maxAllocatedStorage: props.maxAllocatedStorage,
       domain: this.domainId,
       domainIamRoleName: this.domainRole?.roleName,
+      networkType: props.networkType,
     };
   }
 
@@ -803,7 +883,7 @@ export interface DatabaseInstanceSourceProps extends DatabaseInstanceNewProps {
   readonly timezone?: string;
 
   /**
-   * The allocated storage size, specified in gigabytes (GB).
+   * The allocated storage size, specified in gibibytes (GiB).
    *
    * @default 100
    */
@@ -817,11 +897,14 @@ export interface DatabaseInstanceSourceProps extends DatabaseInstanceNewProps {
   readonly databaseName?: string;
 
   /**
-   * The DB parameter group to associate with the instance.
+   * The parameters in the DBParameterGroup to create automatically
    *
-   * @default - no parameter group
+   * You can only specify parameterGroup or parameters but not both.
+   * You need to use a versioned engine to auto-generate a DBParameterGroup.
+   *
+   * @default - None
    */
-  readonly parameterGroup?: IParameterGroup;
+  readonly parameters?: { [key: string]: string };
 }
 
 /**
@@ -847,7 +930,10 @@ abstract class DatabaseInstanceSource extends DatabaseInstanceNew implements IDa
     this.multiUserRotationApplication = props.engine.multiUserRotationApplication;
     this.engine = props.engine;
 
-    let { s3ImportRole, s3ExportRole } = setupS3ImportExport(this, props, true);
+    const engineType = props.engine.engineType;
+    // only Oracle and SQL Server require the import and export Roles to be the same
+    const combineRoles = engineType.startsWith('oracle-') || engineType.startsWith('sqlserver-');
+    let { s3ImportRole, s3ExportRole } = setupS3ImportExport(this, props, combineRoles);
     const engineConfig = props.engine.bindToInstance(this, {
       ...props,
       s3ImportRole,
@@ -866,15 +952,25 @@ abstract class DatabaseInstanceSource extends DatabaseInstanceNew implements IDa
       if (!engineFeatures?.s3Export) {
         throw new Error(`Engine '${engineDescription(props.engine)}' does not support S3 export`);
       }
-      // Only add the export role and feature if they are different from the import role & feature.
-      if (s3ImportRole !== s3ExportRole || engineFeatures.s3Import !== engineFeatures?.s3Export) {
+      // only add the export feature if it's different from the import feature
+      if (engineFeatures.s3Import !== engineFeatures?.s3Export) {
         instanceAssociatedRoles.push({ roleArn: s3ExportRole.roleArn, featureName: engineFeatures?.s3Export });
       }
     }
 
     this.instanceType = props.instanceType ?? ec2.InstanceType.of(ec2.InstanceClass.M5, ec2.InstanceSize.LARGE);
 
-    const instanceParameterGroupConfig = props.parameterGroup?.bindToInstance({});
+    if (props.parameterGroup && props.parameters) {
+      throw new Error('You cannot specify both parameterGroup and parameters');
+    }
+
+    const dbParameterGroupName = props.parameters
+      ? new ParameterGroup(this, 'ParameterGroup', {
+        engine: props.engine,
+        parameters: props.parameters,
+      }).bindToInstance({}).parameterGroupName
+      : this.newCfnProps.dbParameterGroupName;
+
     this.sourceCfnProps = {
       ...this.newCfnProps,
       associatedRoles: instanceAssociatedRoles.length > 0 ? instanceAssociatedRoles : undefined,
@@ -882,11 +978,11 @@ abstract class DatabaseInstanceSource extends DatabaseInstanceNew implements IDa
       allocatedStorage: props.allocatedStorage?.toString() ?? '100',
       allowMajorVersionUpgrade: props.allowMajorVersionUpgrade,
       dbName: props.databaseName,
-      dbParameterGroupName: instanceParameterGroupConfig?.parameterGroupName,
-      engine: props.engine.engineType,
+      engine: engineType,
       engineVersion: props.engine.engineVersion?.fullVersion,
       licenseModel: props.licenseModel,
       timezone: props.timezone,
+      dbParameterGroupName,
     };
   }
 
@@ -908,13 +1004,11 @@ abstract class DatabaseInstanceSource extends DatabaseInstanceNew implements IDa
     }
 
     return new secretsmanager.SecretRotation(this, id, {
+      ...applyDefaultRotationOptions(options, this.vpcPlacement),
       secret: this.secret,
       application: this.singleUserRotationApplication,
       vpc: this.vpc,
-      vpcSubnets: this.vpcPlacement,
       target: this,
-      ...options,
-      excludeCharacters: options.excludeCharacters ?? DEFAULT_PASSWORD_EXCLUDE_CHARS,
     });
   }
 
@@ -925,13 +1019,13 @@ abstract class DatabaseInstanceSource extends DatabaseInstanceNew implements IDa
     if (!this.secret) {
       throw new Error('Cannot add multi user rotation for an instance without secret.');
     }
+
     return new secretsmanager.SecretRotation(this, id, {
-      ...options,
-      excludeCharacters: options.excludeCharacters ?? DEFAULT_PASSWORD_EXCLUDE_CHARS,
+      ...applyDefaultRotationOptions(options, this.vpcPlacement),
+      secret: options.secret,
       masterSecret: this.secret,
       application: this.multiUserRotationApplication,
       vpc: this.vpc,
-      vpcSubnets: this.vpcPlacement,
       target: this,
     });
   }
@@ -994,7 +1088,7 @@ export class DatabaseInstance extends DatabaseInstanceSource implements IDatabas
       characterSetName: props.characterSetName,
       kmsKeyId: props.storageEncryptionKey && props.storageEncryptionKey.keyArn,
       masterUsername: credentials.username,
-      masterUserPassword: credentials.password?.toString(),
+      masterUserPassword: credentials.password?.unsafeUnwrap(),
       storageEncrypted: props.storageEncryptionKey ? true : props.storageEncrypted,
     });
 
@@ -1065,13 +1159,14 @@ export class DatabaseInstanceFromSnapshot extends DatabaseInstanceSource impleme
         encryptionKey: credentials.encryptionKey,
         excludeCharacters: credentials.excludeCharacters,
         replaceOnPasswordCriteriaChanges: credentials.replaceOnPasswordCriteriaChanges,
+        replicaRegions: credentials.replicaRegions,
       });
     }
 
     const instance = new CfnDBInstance(this, 'Resource', {
       ...this.sourceCfnProps,
       dbSnapshotIdentifier: props.snapshotIdentifier,
-      masterUserPassword: secret?.secretValueFromJson('password')?.toString() ?? credentials?.password?.toString(),
+      masterUserPassword: secret?.secretValueFromJson('password')?.unsafeUnwrap() ?? credentials?.password?.unsafeUnwrap(), // Safe usage
     });
 
     this.instanceIdentifier = instance.ref;
@@ -1141,12 +1236,24 @@ export class DatabaseInstanceReadReplica extends DatabaseInstanceNew implements 
   constructor(scope: Construct, id: string, props: DatabaseInstanceReadReplicaProps) {
     super(scope, id, props);
 
+    if (props.sourceDatabaseInstance.engine
+        && !props.sourceDatabaseInstance.engine.supportsReadReplicaBackups
+        && props.backupRetention) {
+      throw new Error(`Cannot set 'backupRetention', as engine '${engineDescription(props.sourceDatabaseInstance.engine)}' does not support automatic backups for read replicas`);
+    }
+
+    // The read replica instance always uses the same engine as the source instance
+    // but some CF validations require the engine to be explicitely passed when some
+    // properties are specified.
+    const shouldPassEngine = props.domain != null;
+
     const instance = new CfnDBInstance(this, 'Resource', {
       ...this.newCfnProps,
       // this must be ARN, not ID, because of https://github.com/terraform-providers/terraform-provider-aws/issues/528#issuecomment-391169012
       sourceDbInstanceIdentifier: props.sourceDatabaseInstance.instanceArn,
       kmsKeyId: props.storageEncryptionKey?.keyArn,
       storageEncrypted: props.storageEncryptionKey ? true : props.storageEncrypted,
+      engine: shouldPassEngine ? props.sourceDatabaseInstance.engine?.engineType : undefined,
     });
 
     this.instanceType = props.instanceType;
@@ -1173,4 +1280,16 @@ function renderProcessorFeatures(features: ProcessorFeatures): CfnDBInstance.Pro
   const featuresList = Object.entries(features).map(([name, value]) => ({ name, value: value.toString() }));
 
   return featuresList.length === 0 ? undefined : featuresList;
+}
+
+function defaultIops(storageType: StorageType, iops?: number): number | undefined {
+  switch (storageType) {
+    case StorageType.STANDARD:
+    case StorageType.GP2:
+      return undefined;
+    case StorageType.GP3:
+      return iops;
+    case StorageType.IO1:
+      return iops ?? 1000;
+  }
 }

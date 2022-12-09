@@ -1,4 +1,4 @@
-import '@aws-cdk/assert-internal/jest';
+import { Template } from '@aws-cdk/assertions';
 import { App, Stack, Token } from '@aws-cdk/core';
 import * as sinon from 'sinon';
 import * as iam from '../lib';
@@ -20,7 +20,7 @@ describe('OpenIdConnectProvider resource', () => {
     });
 
     // THEN
-    expect(stack).toHaveResource('Custom::AWSCDKOpenIdConnectProvider', {
+    Template.fromStack(stack).hasResourceProperties('Custom::AWSCDKOpenIdConnectProvider', {
       Url: 'https://openid-endpoint',
     });
   });
@@ -61,7 +61,7 @@ describe('OpenIdConnectProvider resource', () => {
     });
 
     // THEN
-    expect(stack).toHaveResource('Custom::AWSCDKOpenIdConnectProvider', {
+    Template.fromStack(stack).hasResourceProperties('Custom::AWSCDKOpenIdConnectProvider', {
       Url: 'https://my-url',
       ClientIDList: ['client1', 'client2'],
       ThumbprintList: ['thumb1'],
@@ -103,7 +103,7 @@ describe('custom resource provider infrastructure', () => {
     new iam.OpenIdConnectProvider(stack, 'Provider1', { url: 'provider1' });
 
     // THEN
-    expect(stack).toHaveResource('AWS::IAM::Role', {
+    Template.fromStack(stack).hasResourceProperties('AWS::IAM::Role', {
       Policies: [
         {
           PolicyName: 'Inline',
@@ -161,6 +161,9 @@ describe('custom resource provider handler', () => {
 
     expect(response).toStrictEqual({
       PhysicalResourceId: 'FAKE-ARN',
+      Data: {
+        Thumbprints: '["MyThumbprint"]',
+      },
     });
   });
 
@@ -184,6 +187,9 @@ describe('custom resource provider handler', () => {
 
     expect(response).toStrictEqual({
       PhysicalResourceId: 'FAKE-ARN',
+      Data: {
+        Thumbprints: '["FAKE-THUMBPRINT"]',
+      },
     });
   });
 
@@ -219,6 +225,9 @@ describe('custom resource provider handler', () => {
     // THEN
     expect(response).toStrictEqual({
       PhysicalResourceId: 'FAKE-ARN',
+      Data: {
+        Thumbprints: '["THUMB1","THUMB2"]',
+      },
     });
     sinon.assert.notCalled(downloadThumbprint);
     sinon.assert.calledWithExactly(createOpenIDConnectProvider, {
@@ -244,6 +253,9 @@ describe('custom resource provider handler', () => {
     // THEN
     expect(response).toStrictEqual({
       PhysicalResourceId: 'FAKE-ARN',
+      Data: {
+        Thumbprints: '["FAKE-THUMBPRINT"]',
+      },
     });
     sinon.assert.calledOnceWithExactly(downloadThumbprint, 'https://new');
     sinon.assert.calledOnceWithExactly(createOpenIDConnectProvider, {
@@ -297,10 +309,8 @@ describe('custom resource provider handler', () => {
     });
 
     // THEN
-    sinon.assert.notCalled(downloadThumbprint);
     sinon.assert.notCalled(createOpenIDConnectProvider);
     sinon.assert.notCalled(deleteOpenIDConnectProvider);
-    sinon.assert.notCalled(updateOpenIDConnectProviderThumbprint);
     sinon.assert.calledTwice(addClientIDToOpenIDConnectProvider);
     sinon.assert.calledWithExactly(addClientIDToOpenIDConnectProvider, {
       OpenIDConnectProviderArn: 'FAKE-PhysicalResourceId', ClientID: 'B',

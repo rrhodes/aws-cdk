@@ -1,6 +1,4 @@
-import { ResourcePart, SynthUtils } from '@aws-cdk/assert-internal';
-import '@aws-cdk/assert-internal/jest';
-
+import { Template } from '@aws-cdk/assertions';
 import * as acmpca from '@aws-cdk/aws-acmpca';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as kms from '@aws-cdk/aws-kms';
@@ -15,7 +13,12 @@ describe('MSK Cluster', () => {
   let vpc: ec2.IVpc;
 
   beforeEach(() => {
-    stack = new core.Stack();
+    const app = new core.App({
+      context: {
+        '@aws-cdk/core:newStyleStackSynthesis': false,
+      },
+    });
+    stack = new core.Stack(app);
     vpc = new ec2.Vpc(stack, 'Vpc');
   });
 
@@ -26,32 +29,31 @@ describe('MSK Cluster', () => {
       vpc,
     });
 
-    expect(stack).toHaveResourceLike(
+    Template.fromStack(stack).hasResource(
       'AWS::MSK::Cluster',
       {
         DeletionPolicy: 'Retain',
         UpdateReplacePolicy: 'Retain',
       },
-      ResourcePart.CompleteDefinition,
     );
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       KafkaVersion: '2.6.1',
     });
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       EncryptionInfo: {
         EncryptionInTransit: { ClientBroker: 'TLS', InCluster: true },
       },
     });
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       NumberOfBrokerNodes: 2,
     });
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       BrokerNodeGroupInfo: {
         StorageInfo: { EBSStorageInfo: { VolumeSize: 1000 } },
       },
     });
-    expect(stack).toHaveResource('AWS::EC2::SecurityGroup');
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).resourceCountIs('AWS::EC2::SecurityGroup', 1);
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       BrokerNodeGroupInfo: {
         SecurityGroups: [
           {
@@ -109,19 +111,139 @@ describe('MSK Cluster', () => {
       });
 
       test('fails if tls encryption is set to tls and plaintext', () => {
-        expect(() => new msk.Cluster(stack, 'Cluster', {
+        expect(
+          () =>
+            new msk.Cluster(stack, 'Cluster', {
+              clusterName: 'cluster',
+              kafkaVersion: msk.KafkaVersion.V2_6_1,
+              vpc,
+              encryptionInTransit: {
+                clientBroker: msk.ClientBrokerEncryption.TLS_PLAINTEXT,
+              },
+              clientAuthentication: msk.ClientAuthentication.sasl({
+                scram: true,
+              }),
+            }),
+        ).toThrow(
+          'To enable SASL/SCRAM or IAM authentication, you must only allow TLS-encrypted traffic between clients and brokers.',
+        );
+      });
+    });
+
+    describe('with sasl/iam auth', () => {
+      test('iam enabled is true', () => {
+        new msk.Cluster(stack, 'Cluster', {
           clusterName: 'cluster',
           kafkaVersion: msk.KafkaVersion.V2_6_1,
           vpc,
           encryptionInTransit: {
-            clientBroker: msk.ClientBrokerEncryption.TLS_PLAINTEXT,
+            clientBroker: msk.ClientBrokerEncryption.TLS,
           },
           clientAuthentication: msk.ClientAuthentication.sasl({
-            scram: true,
+            iam: true,
           }),
-        })).toThrow(
-          'To enable SASL/SCRAM authentication, you must only allow TLS-encrypted traffic between clients and brokers.',
+        });
+        Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
+          ClientAuthentication: {
+            Sasl: { Iam: { Enabled: true } },
+          },
+        });
+      });
+      test('fails if tls encryption is set to plaintext', () => {
+        expect(
+          () =>
+            new msk.Cluster(stack, 'Cluster', {
+              clusterName: 'cluster',
+              kafkaVersion: msk.KafkaVersion.V2_6_1,
+              vpc,
+              encryptionInTransit: {
+                clientBroker: msk.ClientBrokerEncryption.PLAINTEXT,
+              },
+              clientAuthentication: msk.ClientAuthentication.sasl({
+                iam: true,
+              }),
+            }),
+        ).toThrow(
+          'To enable client authentication, you must enabled TLS-encrypted traffic between clients and brokers.',
         );
+      });
+
+      test('fails if tls encryption is set to tls and plaintext', () => {
+        expect(
+          () =>
+            new msk.Cluster(stack, 'Cluster', {
+              clusterName: 'cluster',
+              kafkaVersion: msk.KafkaVersion.V2_6_1,
+              vpc,
+              encryptionInTransit: {
+                clientBroker: msk.ClientBrokerEncryption.TLS_PLAINTEXT,
+              },
+              clientAuthentication: msk.ClientAuthentication.sasl({
+                iam: true,
+              }),
+            }),
+        ).toThrow(
+          'To enable SASL/SCRAM or IAM authentication, you must only allow TLS-encrypted traffic between clients and brokers.',
+        );
+      });
+    });
+
+    describe('with sasl/iam auth and tls', () => {
+      test('Snapshot test with all values set (iam/sasl)', () => {
+        const cluster = new msk.Cluster(stack, 'kafka', {
+          clusterName: 'test-cluster',
+          kafkaVersion: msk.KafkaVersion.V2_6_1,
+          vpc,
+          securityGroups: [
+            ec2.SecurityGroup.fromSecurityGroupId(stack, 'sg1', 'sg-123'),
+            ec2.SecurityGroup.fromSecurityGroupId(stack, 'sg2', 'sg-456'),
+          ],
+          ebsStorageInfo: {
+            volumeSize: 100,
+            encryptionKey: kms.Key.fromKeyArn(
+              stack,
+              'kms',
+              'arn:aws:kms:us-east-1:111122223333:key/1234abc',
+            ),
+          },
+          encryptionInTransit: {
+            clientBroker: msk.ClientBrokerEncryption.TLS,
+          },
+          clientAuthentication: msk.ClientAuthentication.saslTls({
+            iam: true,
+            certificateAuthorities: [
+              acmpca.CertificateAuthority.fromCertificateAuthorityArn(
+                stack,
+                'CertificateAuthority',
+                'arn:aws:acm-pca:us-west-2:1234567890:certificate-authority/11111111-1111-1111-1111-111111111111',
+              ),
+            ],
+          }),
+          monitoring: {
+            enablePrometheusJmxExporter: true,
+            enablePrometheusNodeExporter: true,
+            clusterMonitoringLevel: msk.ClusterMonitoringLevel.PER_TOPIC_PER_BROKER,
+          },
+          logging: {
+            s3: {
+              bucket: s3.Bucket.fromBucketName(stack, 'Bucket', 'a-bucket'),
+            },
+            cloudwatchLogGroup: logs.LogGroup.fromLogGroupName(
+              stack,
+              'LogGroup',
+              'a-log-group',
+            ),
+            firehoseDeliveryStreamName: 'a-delivery-stream',
+          },
+        });
+
+        cluster.connections.allowFrom(
+          ec2.SecurityGroup.fromSecurityGroupId(stack, 'sg3', 'sg-3'),
+          ec2.Port.tcp(2181),
+        );
+
+        // THEN
+        expect(Template.fromStack(stack)).toMatchSnapshot();
       });
     });
 
@@ -141,56 +263,40 @@ describe('MSK Cluster', () => {
       });
 
       test('with alias msk/${clusterName}/sasl/scram', () => {
-        expect(stack).toHaveResourceLike('AWS::KMS::Alias', {
+        Template.fromStack(stack).hasResourceProperties('AWS::KMS::Alias', {
           AliasName: 'alias/msk/cluster/sasl/scram',
         });
       });
 
       test('with a policy allowing the secrets manager service to use the key', () => {
-        expect(stack).toHaveResourceLike('AWS::KMS::Key', {
+        Template.fromStack(stack).hasResourceProperties('AWS::KMS::Key', {
           KeyPolicy: {
-            Statement: [
+            'Statement': [
               {
-                Action: [
-                  'kms:Create*',
-                  'kms:Describe*',
-                  'kms:Enable*',
-                  'kms:List*',
-                  'kms:Put*',
-                  'kms:Update*',
-                  'kms:Revoke*',
-                  'kms:Disable*',
-                  'kms:Get*',
-                  'kms:Delete*',
-                  'kms:ScheduleKeyDeletion',
-                  'kms:CancelKeyDeletion',
-                  'kms:GenerateDataKey',
-                  'kms:TagResource',
-                  'kms:UntagResource',
-                ],
-                Effect: 'Allow',
-                Principal: {
-                  AWS: {
+                'Action': 'kms:*',
+                'Effect': 'Allow',
+                'Principal': {
+                  'AWS': {
                     'Fn::Join': [
                       '',
                       [
                         'arn:',
                         {
-                          Ref: 'AWS::Partition',
+                          'Ref': 'AWS::Partition',
                         },
                         ':iam::',
                         {
-                          Ref: 'AWS::AccountId',
+                          'Ref': 'AWS::AccountId',
                         },
                         ':root',
                       ],
                     ],
                   },
                 },
-                Resource: '*',
+                'Resource': '*',
               },
               {
-                Action: [
+                'Action': [
                   'kms:Encrypt',
                   'kms:Decrypt',
                   'kms:ReEncrypt*',
@@ -198,33 +304,53 @@ describe('MSK Cluster', () => {
                   'kms:CreateGrant',
                   'kms:DescribeKey',
                 ],
-                Condition: {
-                  StringEquals: {
+                'Condition': {
+                  'StringEquals': {
                     'kms:ViaService': {
                       'Fn::Join': [
                         '',
                         [
                           'secretsmanager.',
                           {
-                            Ref: 'AWS::Region',
+                            'Ref': 'AWS::Region',
                           },
                           '.amazonaws.com',
                         ],
                       ],
                     },
                     'kms:CallerAccount': {
-                      Ref: 'AWS::AccountId',
+                      'Ref': 'AWS::AccountId',
                     },
                   },
                 },
                 Effect: 'Allow',
-                Principal: '*',
+                Principal: { AWS: '*' },
                 Resource: '*',
+                Sid: 'Allow access through AWS Secrets Manager for all principals in the account that are authorized to use AWS Secrets Manager',
               },
             ],
+            'Version': '2012-10-17',
           },
         });
       });
+    });
+
+    test('fails if more than one authentication method is enabled', () => {
+      expect(
+        () =>
+          new msk.Cluster(stack, 'Cluster', {
+            clusterName: 'cluster',
+            kafkaVersion: msk.KafkaVersion.V2_6_1,
+            vpc,
+            encryptionInTransit: {
+              clientBroker: msk.ClientBrokerEncryption.TLS,
+            },
+            clientAuthentication: msk.ClientAuthentication.sasl({
+              iam: true,
+              scram: true,
+            }),
+          }),
+      ).toThrow('Only one client authentication method can be enabled.');
     });
   });
 
@@ -240,7 +366,7 @@ describe('MSK Cluster', () => {
         ),
       });
 
-      expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+      Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
         BrokerNodeGroupInfo: { InstanceType: 'kafka.m5.xlarge' },
       });
     });
@@ -257,7 +383,7 @@ describe('MSK Cluster', () => {
       ),
     });
 
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       BrokerNodeGroupInfo: { InstanceType: 'kafka.m5.xlarge' },
     });
   });
@@ -273,7 +399,7 @@ describe('MSK Cluster', () => {
         },
       });
 
-      expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+      Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
         LoggingInfo: {
           BrokerLogs: {
             CloudWatchLogs: {
@@ -297,7 +423,8 @@ describe('MSK Cluster', () => {
         },
       });
 
-      expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+      Template.fromStack(stack).resourceCountIs('AWS::S3::BucketPolicy', 0);
+      Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
         LoggingInfo: {
           BrokerLogs: {
             S3: {
@@ -307,6 +434,126 @@ describe('MSK Cluster', () => {
               Enabled: true,
             },
           },
+        },
+      });
+    });
+
+    test('feature flag @aws-cdk/aws-s3:defaultBucketPolicy', () => {
+      const localStack = new core.Stack();
+      localStack.node.setContext('@aws-cdk/aws-s3:createDefaultLoggingPolicy', true);
+      new msk.Cluster(localStack, 'Cluster', {
+        clusterName: 'cluster',
+        kafkaVersion: msk.KafkaVersion.V2_6_1,
+        vpc: new ec2.Vpc(localStack, 'Vpc'),
+        logging: {
+          s3: { bucket: new s3.Bucket(localStack, 'Bucket') },
+        },
+      });
+
+      Template.fromStack(localStack).hasResourceProperties('AWS::S3::BucketPolicy', {
+        PolicyDocument: {
+          Statement: [
+            {
+              Action: 's3:PutObject',
+              Effect: 'Allow',
+              Condition: {
+                StringEquals: {
+                  's3:x-amz-acl': 'bucket-owner-full-control',
+                  'aws:SourceAccount': {
+                    Ref: 'AWS::AccountId',
+                  },
+                },
+                ArnLike: {
+                  'aws:SourceArn': {
+                    'Fn::Join': [
+                      '',
+                      [
+                        'arn:',
+                        {
+                          Ref: 'AWS::Partition',
+                        },
+                        ':logs:',
+                        {
+                          Ref: 'AWS::Region',
+                        },
+                        ':',
+                        {
+                          Ref: 'AWS::AccountId',
+                        },
+                        ':*',
+                      ],
+                    ],
+                  },
+                },
+              },
+              Principal: {
+                Service: 'delivery.logs.amazonaws.com',
+              },
+              Resource: {
+                'Fn::Join': [
+                  '',
+                  [
+                    {
+                      'Fn::GetAtt': [
+                        'Bucket83908E77',
+                        'Arn',
+                      ],
+                    },
+                    '/AWSLogs/',
+                    {
+                      Ref: 'AWS::AccountId',
+                    },
+                    '/*',
+                  ],
+                ],
+              },
+            },
+            {
+              Action: [
+                's3:GetBucketAcl',
+                's3:ListBucket',
+              ],
+              Condition: {
+                StringEquals: {
+                  'aws:SourceAccount': {
+                    Ref: 'AWS::AccountId',
+                  },
+                },
+                ArnLike: {
+                  'aws:SourceArn': {
+                    'Fn::Join': [
+                      '',
+                      [
+                        'arn:',
+                        {
+                          Ref: 'AWS::Partition',
+                        },
+                        ':logs:',
+                        {
+                          Ref: 'AWS::Region',
+                        },
+                        ':',
+                        {
+                          Ref: 'AWS::AccountId',
+                        },
+                        ':*',
+                      ],
+                    ],
+                  },
+                },
+              },
+              Effect: 'Allow',
+              Principal: {
+                Service: 'delivery.logs.amazonaws.com',
+              },
+              Resource: {
+                'Fn::GetAtt': [
+                  'Bucket83908E77',
+                  'Arn',
+                ],
+              },
+            },
+          ],
         },
       });
     });
@@ -321,7 +568,7 @@ describe('MSK Cluster', () => {
         },
       });
 
-      expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+      Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
         LoggingInfo: {
           BrokerLogs: {
             Firehose: {
@@ -366,7 +613,7 @@ describe('MSK Cluster', () => {
       ebsStorageInfo: { encryptionKey: new kms.Key(stack, 'Key') },
     });
 
-    expect(stack).toHaveResourceLike('AWS::MSK::Cluster', {
+    Template.fromStack(stack).hasResourceProperties('AWS::MSK::Cluster', {
       EncryptionInfo: {
         EncryptionAtRest: {
           DataVolumeKMSKeyId: {
@@ -447,7 +694,7 @@ describe('MSK Cluster', () => {
     );
 
     // THEN
-    expect(SynthUtils.toCloudFormation(stack)).toMatchSnapshot();
+    expect(Template.fromStack(stack)).toMatchSnapshot();
   });
 
   describe('when creating sasl/scram users', () => {
@@ -476,7 +723,7 @@ describe('MSK Cluster', () => {
       const username = 'my-user';
       cluster.addUser(username);
 
-      expect(stack).toHaveResourceLike('AWS::SecretsManager::Secret', {
+      Template.fromStack(stack).hasResourceProperties('AWS::SecretsManager::Secret', {
         'Name': {
           'Fn::Join': [
             '',

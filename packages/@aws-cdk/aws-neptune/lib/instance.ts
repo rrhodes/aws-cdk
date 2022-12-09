@@ -1,3 +1,4 @@
+import * as cloudwatch from '@aws-cdk/aws-cloudwatch';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as cdk from '@aws-cdk/core';
 import { Construct } from 'constructs';
@@ -11,6 +12,46 @@ import { IParameterGroup } from './parameter-group';
  * used for defining {@link DatabaseInstanceProps.instanceType}.
  */
 export class InstanceType {
+
+  /**
+   * db.r6g.large
+   */
+  public static readonly R6G_LARGE = InstanceType.of('db.r6g.large');
+
+  /**
+   * db.r6g.xlarge
+   */
+  public static readonly R6G_XLARGE = InstanceType.of('db.r6g.xlarge');
+
+  /**
+   * db.r6g.2xlarge
+   */
+  public static readonly R6G_2XLARGE = InstanceType.of('db.r6g.2xlarge');
+
+  /**
+   * db.r6g.4xlarge
+   */
+  public static readonly R6G_4XLARGE = InstanceType.of('db.r6g.4xlarge');
+
+  /**
+   * db.r6g.8xlarge
+   */
+  public static readonly R6G_8XLARGE = InstanceType.of('db.r6g.8xlarge');
+
+  /**
+  * db.r6g.12xlarge
+  */
+  public static readonly R6G_12XLARGE = InstanceType.of('db.r6g.12xlarge');
+
+  /**
+   * db.r6g.16xlarge
+   */
+  public static readonly R6G_16XLARGE = InstanceType.of('db.r6g.16xlarge');
+
+  /**
+   * db.t4g.medium
+   */
+  public static readonly T4G_MEDIUM = InstanceType.of('db.t4g.medium');
 
   /**
    * db.r5.large
@@ -125,6 +166,14 @@ export interface IDatabaseInstance extends cdk.IResource {
    * @attribute Port
    */
   readonly dbInstanceEndpointPort: string;
+
+  /**
+   * Return the given named metric associated with this database instance
+   *
+   * @see https://docs.aws.amazon.com/neptune/latest/userguide/cw-metrics.html
+   * @see https://docs.aws.amazon.com/neptune/latest/userguide/cw-dimensions.html
+   */
+  metric(metricName: string, props?: cloudwatch.MetricOptions): cloudwatch.Metric;
 }
 
 /**
@@ -193,27 +242,64 @@ export interface DatabaseInstanceProps {
 }
 
 /**
- * A database instance
- *
- * @resource AWS::Neptune::DBInstance
+ * A new or imported database instance.
  */
-export class DatabaseInstance extends cdk.Resource implements IDatabaseInstance {
-
+export abstract class DatabaseInstanceBase extends cdk.Resource implements IDatabaseInstance {
   /**
    * Import an existing database instance.
    */
   public static fromDatabaseInstanceAttributes(scope: Construct, id: string, attrs: DatabaseInstanceAttributes): IDatabaseInstance {
-    class Import extends cdk.Resource implements IDatabaseInstance {
+    class Import extends DatabaseInstanceBase implements IDatabaseInstance {
       public readonly defaultPort = ec2.Port.tcp(attrs.port);
       public readonly instanceIdentifier = attrs.instanceIdentifier;
       public readonly dbInstanceEndpointAddress = attrs.instanceEndpointAddress;
       public readonly dbInstanceEndpointPort = attrs.port.toString();
       public readonly instanceEndpoint = new Endpoint(attrs.instanceEndpointAddress, attrs.port);
     }
-
     return new Import(scope, id);
   }
 
+  /**
+   * @inheritdoc
+   */
+  public abstract readonly dbInstanceEndpointAddress: string;
+
+  /**
+   * @inheritdoc
+   */
+  public abstract readonly dbInstanceEndpointPort: string;
+
+  /**
+   * @inheritdoc
+   */
+  public abstract readonly instanceEndpoint: Endpoint;
+
+  /**
+   * @inheritdoc
+   */
+  public abstract readonly instanceIdentifier: string;
+
+  /**
+   * @inheritdoc
+   */
+  public metric(metricName: string, props?: cloudwatch.MetricOptions): cloudwatch.Metric {
+    return new cloudwatch.Metric({
+      namespace: 'AWS/Neptune',
+      dimensionsMap: {
+        DBInstanceIdentifier: this.instanceIdentifier,
+      },
+      metricName,
+      ...props,
+    });
+  }
+}
+
+/**
+ * A database instance
+ *
+ * @resource AWS::Neptune::DBInstance
+ */
+export class DatabaseInstance extends DatabaseInstanceBase implements IDatabaseInstance {
 
   /**
    * The instance's database cluster
