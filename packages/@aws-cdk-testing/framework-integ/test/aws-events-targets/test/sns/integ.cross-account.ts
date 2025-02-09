@@ -1,29 +1,36 @@
 import { IntegTest } from '@aws-cdk/integ-tests-alpha';
-import { App, Duration, Stack } from 'aws-cdk-lib';
+import { App, Duration, PhysicalName, Stack } from 'aws-cdk-lib';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 
+const sourceAccount = process.env.CDK_INTEG_ACCOUNT || process.env.CDK_DEFAULT_ACCOUNT || '123456789012';
+const targetAccount = process.env.CDK_INTEG_CROSS_ACCOUNT || '234567890123';
+
 const app = new App();
-const stack = new Stack(app, 'sns-events-cross-account');
+const sourceStack = new Stack(app, 'lambda-events-cross-account-source', {
+  env: { account: sourceAccount, region: 'us-east-1' },
+});
+const targetStack = new Stack(app, 'lambda-events-cross-account-target', {
+  env: { account: targetAccount, region: 'us-east-1' },
+});
 
-const topic = sns.Topic.fromTopicArn(
-  stack,
-  'External',
-  'arn:aws:sns:eu-west-1:234567890123:MyTopic',
-);
+const topic = new sns.Topic(targetStack, 'MyTopic', {
+  topicName: PhysicalName.GENERATE_IF_NEEDED,
+});
 
-const timer = new events.Rule(stack, 'Timer', {
+const timer = new events.Rule(sourceStack, 'Timer', {
   schedule: events.Schedule.rate(Duration.minutes(1)),
 });
 
-const role = new iam.Role(stack, 'Role', {
+const role = new iam.Role(sourceStack, 'Role', {
   assumedBy: new iam.ServicePrincipal('events.amazonaws.com'),
+  roleName: PhysicalName.GENERATE_IF_NEEDED,
 });
 
 timer.addTarget(new targets.SnsTopic(topic, { role }));
 
-new IntegTest(app, 'Integ', { testCases: [stack] });
+new IntegTest(app, 'Integ', { testCases: [sourceStack] });
 
 app.synth();
